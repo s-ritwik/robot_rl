@@ -11,18 +11,26 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab.managers import RewardTermCfg as RewTerm
 from robot_rl.tasks.manager_based.robot_rl import mdp
 from .g1_rough_env_lip_cfg import G1RoughLipEnvCfg
-
+from robot_rl.tasks.manager_based.robot_rl.mdp.cmd_cfg import HZDCommandCfg
+from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import CommandsCfg 
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import G1_MINIMAL_CFG  # isort: skip
 
+class G1FlatHZDCommandsCfg(CommandsCfg):
+
+     hzd_ref = HZDCommandCfg()
+     hzd_ref.foot_body_name = ".*HenkeAnkleLink"
+
 ##
 # Environment configuration
 ##
 @configclass
-class G1FlatLipEnvCfg(G1RoughLipEnvCfg):
+class G1FlatHZDEnvCfg(G1RoughLipEnvCfg):
     """Configuration for the G1 Flat environment."""
+    commands: G1FlatHZDCommandsCfg = G1FlatHZDCommandsCfg()
+
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
@@ -40,9 +48,7 @@ class G1FlatLipEnvCfg(G1RoughLipEnvCfg):
         self.curriculum.terrain_levels = None
 
 
-
-
-class G1FlatRefTrackingEnvCfg(G1FlatLipEnvCfg):
+class G1FlatRefTrackingEnvCfg(G1FlatHZDEnvCfg):
     """Configuration for the G1 Flat environment."""
     def __post_init__(self):
         # post init of parent
@@ -52,7 +58,7 @@ class G1FlatRefTrackingEnvCfg(G1FlatLipEnvCfg):
         self.rewards.clf_decreasing_condition = None
         self.curriculum.clf_curriculum = None
 
-class G1FlatLipVdotEnvCfg(G1FlatLipEnvCfg):
+class G1FlatHZDVdotEnvCfg(G1FlatHZDEnvCfg):
     """Configuration for the G1 Flat environment."""
     def __post_init__(self):
         # post init of parent
@@ -68,7 +74,7 @@ class G1FlatLipVdotEnvCfg(G1FlatLipEnvCfg):
             }
         )
 
-class G1FlatLipEnvCfg_PLAY(G1FlatLipEnvCfg):
+class G1FlatHZDEnvCfg_PLAY(G1FlatHZDEnvCfg):
     def __post_init__(self) -> None:
         # post init of parent
         super().__post_init__()
