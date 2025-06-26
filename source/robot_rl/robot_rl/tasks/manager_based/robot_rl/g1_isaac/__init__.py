@@ -23,7 +23,7 @@ from robot_rl.tasks.manager_based.robot_rl.g1 import agents
 # )
 
 
-# gym.register(
+# --gym.register(
 #     id="custom-Isaac-Velocity-Rough-G1-Play-v0",
 #     entry_point="isaaclab.envs:ManagerBasedRLEnv",
 #     disable_env_checker=True,
