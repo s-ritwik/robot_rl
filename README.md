@@ -85,7 +85,8 @@ RL Task list:
 | Task             |   Robot    |   Hardware Tested?   | Description                                                      |
 |------------------|:----------:|:--------------------:|------------------------------------------------------------------|
 | `G1-flat-vel`    |     G1     |  :white_check_mark:  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
-| `Amber-flat-vel` |    AMBER   |           ❌         | Basic, hand-tuned(still ongoing) RL walking on AMBER             |
+| `Amber-flat-vel` |    AMBER   |           ❌         | Basic, hand-tuned(still ongoing) RL walking on AMBER on flat ground           |
+| `Amber-rough-vel` |    AMBER   |           ❌         | Basic RL walking on AMBER on rough ground (not tuned)           |
 
 
 ## sim2sim Transfer
