@@ -683,121 +683,330 @@ def torso_rotation_cost(
     return cost
 
 
-def foot_forward_placement_amber(
+def alternation_contact_reward(
     env: ManagerBasedRLEnv,
-    command_name: str,
-    threshold: float,
-    period: float = 0.8,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_shin","right_shin"]),
+    left_sensor_name: str = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
 ) -> torch.Tensor:
     """
-    Reward how far the stance shin is ahead of the swing shin along the robot's forward (x) axis.
-    Uses the phase clock to decide which foot is in stance.
-    Returns a [num_envs] tensor in [0, threshold].
+    +1 when contact alternates feet (L→R or R→L),
+    -1 when the same foot contacts twice in a row,
+     0 otherwise (no new contact).
     """
-    # 1) get robot asset & shin‐link indices
+    N, device = env.num_envs, env.device
+
+    # contact flags
+    def contact(name):
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        return (
+            fh.norm(dim=-1)
+              .max(dim=1)[0]
+              .max(dim=1)[0] > 1.0
+        )
+
+    c_l = contact(left_sensor_name)
+    c_r = contact(right_sensor_name)
+
+    # rising‐edges (new contact events)
+    if not hasattr(alternation_contact_reward, "_prev_l"):
+        alternation_contact_reward._prev_l = torch.zeros(N, device=device, dtype=torch.bool)
+        alternation_contact_reward._prev_r = torch.zeros(N, device=device, dtype=torch.bool)
+        # last contact: -1 = none yet, 0 = left, 1 = right
+        alternation_contact_reward._last   = torch.full((N,), -1, device=device, dtype=torch.long)
+        # stored reward until next event
+        alternation_contact_reward._out    = torch.zeros(N, device=device)
+
+    prev_l = alternation_contact_reward._prev_l
+    prev_r = alternation_contact_reward._prev_r
+    last   = alternation_contact_reward._last
+    out    = alternation_contact_reward._out
+
+    event_l = c_l & ~prev_l
+    event_r = c_r & ~prev_r
+
+    # LEFT contacts
+    idx_l = event_l.nonzero(as_tuple=False).flatten()
+    if idx_l.numel():
+        # if last was RIGHT (1) → alternation → +1; 
+        # if last was LEFT (0) → consecutive → -1;
+        # if last==-1 → first contact → 0
+        last_vals = last[idx_l]
+        # build mask for each case
+        mask_alt = last_vals == 1
+        mask_same= last_vals == 0
+        out[idx_l[mask_alt]]  =  1.0
+        out[idx_l[mask_same]] = -1.0
+        # record LEFT as last
+        last[idx_l] = 0
+
+    # RIGHT contacts
+    idx_r = event_r.nonzero(as_tuple=False).flatten()
+    if idx_r.numel():
+        last_vals = last[idx_r]
+        mask_alt = last_vals == 0
+        mask_same= last_vals == 1
+        out[idx_r[mask_alt]]  =  1.0
+        out[idx_r[mask_same]] = -1.0
+        last[idx_r] = 1
+
+    # update prev flags
+    prev_l.copy_(c_l)
+    prev_r.copy_(c_r)
+    # print(out)
+    return out
+
+
+def feet_slide_amber(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_shin", "right_shin"]),
+    left_sensor_name: str = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+) -> torch.Tensor:
+    """
+    Penalize foot sliding on Amber shins:
+    Returns a [num_envs] tensor = sum of squared horizontal foot velocities
+    when each shin is in contact with the ground.
+    """
+    # 1) fetch the two shin contact sensors
+    left_s   = env.scene.sensors[left_sensor_name]
+    right_s  = env.scene.sensors[right_sensor_name]
+
+    # 2) build contact masks [N]
+    def in_contact(sensor):
+        fh = sensor.data.net_forces_w_history    # [N, hist_len, bodies, 3]
+        # norm → max over history → max over bodies → bool [N]
+        return (
+            fh.norm(dim=-1)
+              .max(dim=1)[0]
+              .max(dim=1)[0]
+              > 1.0
+        )
+
+    c_l = in_contact(left_s)
+    c_r = in_contact(right_s)
+
+    # 3) get shin horizontal velocities
     asset     = env.scene[asset_cfg.name]
     left_id, right_id = asset_cfg.body_ids
+    body_vel  = asset.data.body_lin_vel_w        # [N, num_bodies, 3]
+    v_l       = body_vel[:, left_id, :2]        # [N, 2]
+    v_r       = body_vel[:, right_id, :2]       # [N, 2]
 
-    # 2) get world‐x positions of both shins: [N]
-    pos_w     = asset.data.body_pos_w  # [N, num_bodies, 3]
-    x_l       = pos_w[:, left_id,  0]
-    x_r       = pos_w[:, right_id, 0]
-    # print("left foot pos:",x_l)
-    # print("right foot pos",x_r)
+    # 4) squared speed
+    speed_sq_l = torch.sum(v_l**2, dim=-1)      # [N]
+    speed_sq_r = torch.sum(v_r**2, dim=-1)      # [N]
 
-    # 3) compute stance foot index from the gait‐phase clock
-    tp        = (env.sim.current_time % period) / period
-    stance_i  = 1 if math.sin(2 * math.pi * tp) > 0 else 0
-
-    # 4) contact flags (only reward placement if foot is actually contacting)
-    def in_contact(sensor_name):
-        fh = env.scene.sensors[sensor_name].data.net_forces_w_history
-        # → bool [N]
-        return (fh.norm(dim=-1)
-                  .max(dim=1)[0]
-                  .max(dim=1)[0]
-                  > 1.0)
-
-    c_l = in_contact("contact_forces_left")
-    c_r = in_contact("contact_forces_right")
-
-    # 5) compute forward‐placement delta only for the stance foot when in contact
-    #    left stance: reward = max(0, x_l - x_r)
-    #    right stance: reward = max(0, x_r - x_l)
-    forward_delta = torch.where(
-        (stance_i == 0) & c_l, x_l - x_r,
-        torch.where((stance_i == 1) & c_r, x_r - x_l, torch.zeros_like(x_l))
-    )
-
-    # 6) clamp to [0, threshold]
-    out = torch.clamp(forward_delta, min=0.0, max=threshold)
-
-    # 7) mask out any zero‐speed steps (so we only reward when you're actually moving)
-    cmd = env.command_manager.get_command(command_name)[:, :2]
-    speed_mask = (torch.norm(cmd, dim=1) > 0.1).float()
-    res = out * speed_mask
-
-    # _check_nan("foot_forward_placement_amber", res)
-    return res
+    # 5) penalty only when in contact
+    penalty = speed_sq_l * c_l.float() + speed_sq_r * c_r.float()
+    return penalty
 
 
-def alternating_forward_step(
+def alternative_linear_last_contact(
     env: ManagerBasedRLEnv,
     command_name: str,
-    threshold: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg(
         "robot", body_names=["left_shin", "right_shin"]
     ),
-    min_cmd_speed: float = 0.1,
+    left_sensor_name: str = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+    min_cmd_speed: float = 0.05,
+    limit: float = 0.15,
 ) -> torch.Tensor:
     """
-    Reward when exactly one shin is in contact AND that shin is
-    ahead of the other along the commanded forward direction.
-    Returns [num_envs].
+    Reward = clamp((x_contacting - x_other_last_contact) * sign(cmd_x), 
+                   min=-limit, max=+limit),
+    computed only at the moment one shin contacts *after* the other.
+    The value then holds until the next alternating-contact event.
+    Returns a [num_envs] tensor.
     """
-    # 1) get robot & shin‐link indices
-    asset    = env.scene[asset_cfg.name]
-    right_id, left_id = asset_cfg.body_ids
+    N, device = env.num_envs, env.device
+    asset     = env.scene[asset_cfg.name]
+    right_id, left_id = asset_cfg.body_ids   # as per URDF ordering
 
-    # 2) shin world‐x positions
-    pos_w = asset.data.body_pos_w    # [N, num_bodies, 3]
-    x_l   = pos_w[:, left_id,  0]    # [N]
-    x_r   = pos_w[:, right_id, 0]    # [N]
+    # --- contact flags & rising‐edges ---------------------------------------
+    def contact(name):
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        return (fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0] > 1.0)
 
-    # 3) instantaneous contact booleans
-    def in_contact(name):
-        fh = env.scene.sensors[name].data.net_forces_w_history  # [N, hist, bodies, 3]
+    c_l = contact(left_sensor_name)
+    c_r = contact(right_sensor_name)
+
+    # init persistent prev‐contact buffers
+    if not hasattr(alternative_linear_last_contact, "_prev_l"):
+        alternative_linear_last_contact._prev_l = torch.zeros(N, device=device, dtype=torch.bool)
+        alternative_linear_last_contact._prev_r = torch.zeros(N, device=device, dtype=torch.bool)
+    prev_l = alternative_linear_last_contact._prev_l
+    prev_r = alternative_linear_last_contact._prev_r
+
+    # rising‐edges: now contact & was not contacting
+    event_l = c_l & ~prev_l
+    event_r = c_r & ~prev_r
+
+    # update prev flags for next call
+    prev_l.copy_(c_l)
+    prev_r.copy_(c_r)
+
+    # --- persistent storage of last contact‐x & held reward ----------------
+    if not hasattr(alternative_linear_last_contact, "_last_l"):
+        alternative_linear_last_contact._last_l = torch.zeros(N, device=device)
+        alternative_linear_last_contact._last_r = torch.zeros(N, device=device)
+        alternative_linear_last_contact._has_l  = torch.zeros(N, device=device, dtype=torch.bool)
+        alternative_linear_last_contact._has_r  = torch.zeros(N, device=device, dtype=torch.bool)
+        alternative_linear_last_contact._reward = torch.zeros(N, device=device)
+    last_l = alternative_linear_last_contact._last_l
+    last_r = alternative_linear_last_contact._last_r
+    has_l  = alternative_linear_last_contact._has_l
+    has_r  = alternative_linear_last_contact._has_r
+    out    = alternative_linear_last_contact._reward
+
+    # --- read command and positions ----------------------------------------
+    cmd_x    = env.command_manager.get_command(command_name)[:, 0]
+    dir_sign = torch.sign(cmd_x)                                        # ±1 or 0
+    motion   = (cmd_x.abs() > min_cmd_speed).float()                    # mask
+
+    pos      = asset.data.body_pos_w                                    # [N, bodies, 3]
+    x_l_now  = pos[:, left_id,  0]
+    x_r_now  = pos[:, right_id, 0]
+
+    # --- on left‐event ------------------------------------------------------
+    idx = event_l.nonzero(as_tuple=False).squeeze(-1)
+    if idx.numel():
+        # record this contact position
+        last_l[idx] = x_l_now[idx]
+        if has_r[idx].any():
+            step = (x_l_now[idx] - last_r[idx]) * dir_sign[idx]
+            out[idx] = torch.clamp(step, min=-limit, max=limit)
+        has_l[idx] = True
+
+    # --- on right‐event -----------------------------------------------------
+    idx = event_r.nonzero(as_tuple=False).squeeze(-1)
+    if idx.numel():
+        last_r[idx] = x_r_now[idx]
+        if has_l[idx].any():
+            step = (x_r_now[idx] - last_l[idx]) * dir_sign[idx]
+            out[idx] = torch.clamp(step, min=-limit, max=limit)
+        has_r[idx] = True
+
+    # --- zero out if not moving --------------------------------------------
+    out = out * motion
+
+    # print(out)
+    return out
+
+
+def alternate_feet_cycle(
+    env: ManagerBasedRLEnv,
+    period: float = 0.8,
+    left_sensor_name: str = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+) -> torch.Tensor:
+    """
+    Penalise >1 contacts of the same foot within a full gait cycle (length = 'period').
+    Penalty grows exponentially with extra contacts:
+        contacts_per_cycle = 1 → penalty 0  (perfect)
+                              2 → penalty 1
+                              3 → penalty 3
+                              4 → penalty 7
+                              ...
+    Return shape: [num_envs]  (non-negative).
+    """
+    N, dev = env.num_envs, env.device
+
+    # ---------- helpers -------------------------------------------------
+    def contact_flag(sensor_name: str) -> torch.Tensor:           # bool[N]
+        fh = env.scene.sensors[sensor_name].data.net_forces_w_history
+        return (fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0] > 1.0)
+
+    # ---------- initialise persistent buffers on first call -------------
+    if not hasattr(alternate_feet_cycle, "_cycle"):
+        # current cycle index (floor(t/period))
+        alternate_feet_cycle._cycle_idx = torch.full((N,), -1, device=dev, dtype=torch.long)
+        # contact counts in *current* cycle
+        alternate_feet_cycle._cnt_l     = torch.zeros(N, device=dev, dtype=torch.long)
+        alternate_feet_cycle._cnt_r     = torch.zeros(N, device=dev, dtype=torch.long)
+        # previous step contact flags (for rising-edge detection)
+        alternate_feet_cycle._prev_cl   = torch.zeros(N, device=dev, dtype=torch.bool)
+        alternate_feet_cycle._prev_cr   = torch.zeros(N, device=dev, dtype=torch.bool)
+
+    cyc      = alternate_feet_cycle._cycle_idx
+    cnt_l    = alternate_feet_cycle._cnt_l
+    cnt_r    = alternate_feet_cycle._cnt_r
+    prev_cl  = alternate_feet_cycle._prev_cl
+    prev_cr  = alternate_feet_cycle._prev_cr
+
+    # ---------- compute current cycle index -----------------------------
+    t              = env.sim.current_time
+    cycle_scalar = math.floor(t / period)                               # plain int
+    cycle_now    = torch.full((N,), cycle_scalar, device=dev, dtype=torch.long)
+    new_cycle_mask = cycle_now != cyc                           # bool[N]
+
+    # ---------- contact edge detection ----------------------------------
+    cl = contact_flag(left_sensor_name)
+    cr = contact_flag(right_sensor_name)
+    rising_l =  cl & ~prev_cl
+    rising_r =  cr & ~prev_cr
+
+    # update counts within *current* cycle
+    cnt_l += rising_l.long()
+    cnt_r += rising_r.long()
+
+    # ---------- at cycle change: compute penalty & reset counts ----------
+    # extra_contacts = max(0, count-1)
+    extra_l = torch.clamp(cnt_l - 1, min=0)
+    extra_r = torch.clamp(cnt_r - 1, min=0)
+    # exponential penalty: 2^extra − 1   (0→0, 1→1, 2→3, 3→7,…)
+    pen_l   = (2**extra_l) - 1
+    pen_r   = (2**extra_r) - 1
+    cycle_penalty      = pen_l + pen_r                 # [N]
+
+    # emit penalty *only* on the first step of the new cycle; else 0
+    penalty = torch.where(new_cycle_mask, cycle_penalty.float(), torch.zeros_like(cycle_penalty))
+
+    # reset counts for envs that started a new cycle
+    cnt_l[new_cycle_mask]  = 0
+    cnt_r[new_cycle_mask]  = 0
+    cyc[new_cycle_mask]    = cycle_now[new_cycle_mask]
+
+    # ---------- store current contact flags for next step ---------------
+    prev_cl.copy_(cl)
+    prev_cr.copy_(cr)
+
+    return penalty
+
+def contact_no_vel_amber(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["left_shin", "right_shin"]
+    ),
+    left_sensor_name: str = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+) -> torch.Tensor:
+    """
+    Penalise squared foot velocity (x-y-z) **only** when the left/right shin
+    is in ground contact.  Returns a [num_envs] penalty (≥0).
+    """
+    # 1) helper for contact flag ------------------------------------------------
+    def in_contact(sensor_name: str) -> torch.Tensor:        # bool [N]
+        fh = env.scene.sensors[sensor_name].data.net_forces_w_history
         return (
             fh.norm(dim=-1)           # [N, hist, bodies]
-              .max(dim=1)[0]          # max over history → [N, bodies]
-              .max(dim=1)[0] > 1.0    # max over bodies → bool [N]
+              .max(dim=1)[0]          # [N, bodies]
+              .max(dim=1)[0] > 1.0    # bool [N]
         )
 
-    c_l = in_contact("contact_forces_left")
-    c_r = in_contact("contact_forces_right")
-    if torch.abs(c_l)>0.1:
-        print("x_l:",x_l)
-    if torch.abs(c_r)>0.1:
-        print("x_r:",x_r)
-    # 4) commanded forward/backward direction (x-axis)
-    cmd  = env.command_manager.get_command(command_name)[:, 0]  # [N]
-    dir  = torch.sign(cmd)                                      # {–1,0,1}
-    moving_mask = (torch.abs(cmd) > min_cmd_speed).float()      # [N]
+    c_left  = in_contact(left_sensor_name).float()           # [N]
+    c_right = in_contact(right_sensor_name).float()          # [N]
 
-    # 5) per‐foot forward delta *in commanded dir*
-    delta_l = (x_l - x_r) * dir  # positive means left is ahead if dir>0
-    delta_r = (x_r - x_l) * dir
+    # 2) fetch foot world velocities -------------------------------------------
+    asset  = env.scene[asset_cfg.name]
+    left_id, right_id = asset_cfg.body_ids
+    vel    = asset.data.body_lin_vel_w                      # [N, bodies, 3]
+    v_l    = vel[:, left_id,  :]                            # [N, 3]
+    v_r    = vel[:, right_id, :]                            # [N, 3]
 
-    # 6) only one contact AND forward placement
-    ok_l = c_l & ~c_r & (delta_l > 0)
-    ok_r = c_r & ~c_l & (delta_r > 0)
+    # 3) squared speed, mask by contact ----------------------------------------
+    pen_l = torch.sum(v_l**2, dim=-1) * c_left              # [N]
+    pen_r = torch.sum(v_r**2, dim=-1) * c_right             # [N]
 
-    # 7) build reward: distance stepped (clamped), masked by motion
-    r_l    = torch.where(ok_l, delta_l, torch.zeros_like(delta_l))
-    r_r    = torch.where(ok_r, delta_r, torch.zeros_like(delta_r))
-    reward = r_l + r_r
-    reward = torch.clamp(reward, max=threshold)
-    reward = reward * moving_mask
-
-    return reward
+    penalty = pen_l + pen_r                                 # [N]
+    return penalty

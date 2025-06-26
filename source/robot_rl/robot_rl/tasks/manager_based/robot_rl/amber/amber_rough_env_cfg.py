@@ -163,7 +163,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
 
         # self.rewards.height_torso.params["target_height"] = 0.75
         # self.rewards.feet_clearance.params["target_height"] = 0.12
-        self.rewards.joint_angles.weight        = 2   # e.g. half strength
+        self.rewards.joint_angles.weight        = 8   # e.g. half strength
         self.rewards.joint_angles.params["std"] = 0.3   # narrower kernel
 
         #phase following

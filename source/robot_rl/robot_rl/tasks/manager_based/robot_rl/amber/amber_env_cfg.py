@@ -114,20 +114,20 @@ class AmberRewardCfg(RewardsCfg):
     """Keep the default velocity‐tracking rewards, but turn off unwanted terms."""
 
     # big penalty on fall (pelvis contact)
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-100.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
 
     # track forward velocity (x) – using the base class's XY function is fine since y is always zero
     track_lin_vel_xy = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
-        weight=1.5,
+        weight=4,
         params={"command_name": "base_velocity",
                         "std": 0.5,      },      # required parameter},
     )
     # punishes joint angles
     joint_angles = RewTerm(
         func=mdp.track_joint_angles_exp,
-        weight=3.0,           # <— tune this scalar to control strength
-        params={"std": 0.5},  # <— how “wide” your kernel is
+        weight=10.0,           # <— tune this scalar to control strength
+        params={"std": 0.2},  # <— how “wide” your kernel is
     )
     # torso angle
     torso_rotation = RewTerm(
@@ -141,41 +141,48 @@ class AmberRewardCfg(RewardsCfg):
     #rewards symmetric footsteps
     foot_phase_contact = RewTerm(
         func=mdp.foot_phase_contact,
-        weight=1,   # tune so “2 in‐phase” ≈ your other reward scales
+        weight=2,   # tune so “2 in‐phase” ≈ your other reward scales
         params={
-            "period": 0.8,
+            "period": PERIOD,
             "left_sensor_name": "contact_forces_left",
             "right_sensor_name": "contact_forces_right",
         },
     )
-
-    #one feet is in front of the other
-    # foot_forward_placement = RewTerm(
-    #     func=mdp.foot_forward_placement_amber,
-    #     weight=1.0,     # tune so a good “step” (~threshold) is on par with other rewards
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "threshold":    0.1,    # meters per step before it saturates
-    #         "period":       0.8,    # your gait period
-    #         # shin body_names come from your URDF
-    #         "asset_cfg":    SceneEntityCfg("robot", body_names=["left_shin","right_shin"]),
-    #     },
-    # )
-    #     # alternative and progressive footsteps
-    alternating_forward_step = RewTerm(
-        func=mdp.alternating_forward_step,
-        weight=100,   # tune so a “good” forward step ≈ your other rewards
-        params={
-            "command_name":   "base_velocity",
-            "threshold":      0.1,   # max meters per step before saturation
-            # shin link names come from your URDF
-            "asset_cfg":      SceneEntityCfg(
-                                   "robot",
-                                   body_names=["left_shin", "right_shin"]
-                               ),
-            "min_cmd_speed":  0.1,   # only reward when moving
+    # rewards consecutive foot placements
+    alternation_contact = RewTerm(
+        func   = mdp.alternation_contact_reward,
+        weight = 60.0,    # positive to reward alternation, negative for repeats
+        params = {
+            "left_sensor_name":  "contact_forces_left",
+            "right_sensor_name": "contact_forces_right",
         },
     )
+    # rewards progressive foots
+    progressive_step = RewTerm(
+        func   = mdp.alternative_linear_last_contact,
+        weight = 5.0,   # positive → reward forward stepping correctly
+        params = {
+            "command_name":       "base_velocity",
+            "asset_cfg":          SceneEntityCfg(
+                                      "robot",
+                                      body_names=["left_shin","right_shin"]
+                                   ),
+            "left_sensor_name":   "contact_forces_left",
+            "right_sensor_name":  "contact_forces_right",
+            "min_cmd_speed":      0.05,
+            "limit": 0.18,
+        },
+    )
+    # #penalises consecutive foot touches in a cycle
+    # alternate_feet = RewTerm(
+    #     func   = mdp.alternate_feet_cycle,
+    #     weight = -1.5,             # negative → converts penalty to cost
+    #     params = {
+    #         "period":            PERIOD,
+    #         "left_sensor_name":  "contact_forces_left",
+    #         "right_sensor_name": "contact_forces_right",
+    #     },
+    # )
     # foot_clearance = RewTerm(
     #     func=mdp.foot_clearance_amber,
     #     weight=1.0,   # tune so its scale matches your other rewards
@@ -185,15 +192,27 @@ class AmberRewardCfg(RewardsCfg):
     #         "right_sensor_name": "contact_forces_right",
     #     },
     # )
-    # symmetric_foot_airtime = RewTerm(
-    #     func=mdp.symmetric_phase_contact_amber,
-    #     weight=2,   # tune to balance with other rewards
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "threshold":    2,
-    #         "period":      0.8,
-    #     },
-    # )
+    symmetric_foot_airtime = RewTerm(
+        func=mdp.symmetric_phase_contact_amber,
+        weight=4,   # tune to balance with other rewards
+        params={
+            "command_name": "base_velocity",
+            "threshold":    2,
+            "period":      PERIOD,
+        },
+    )
+    feet_no_slip_condition = RewTerm(
+        func   = mdp.contact_no_vel_amber,
+        weight = -10,                 # negative → subtracts squared-speed cost
+        params = {
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["left_shin", "right_shin"]
+            ),
+            "left_sensor_name":  "contact_forces_left",
+            "right_sensor_name": "contact_forces_right",
+        },
+    )
     # no need to track angular yaw (z) or sideways velocity
     track_ang_vel_z = None
     # small alive bonus
