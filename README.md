@@ -85,25 +85,9 @@ RL Task list:
 | Task          |   Robot    |   Hardware Tested?   | Description                                                      |
 |---------------|:----------:|:--------------------:|------------------------------------------------------------------|
 | `G1-flat-vel` |     G1     |  :white_check_mark:  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
-
-To play the most recently trained policy for a given task run:
-```bash
-python scripts/<RL_LIBRARY>/play.py --task=<TASK_NAME>
-```
-
-If you want to play from a specific checkpoint then you can run the play script with `--checkpoint=<log_dir_checkpoint>`.
-
-For both `train` and `play` you can also specify a number of envs with `--num_envs=###`.
-
-TODO: Discuss custom train and play scripts.
-
-## RL Tasks
-
-RL Task list:
-
-| Task          |   Robot    |   Hardware Tested?   | Description                                                      |
 |---------------|:----------:|:--------------------:|------------------------------------------------------------------|
-| `G1-flat-vel` |     G1     |  :white_check_mark:  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
+| `Amber-flat-vel` |     G1     |  ❌  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
+|---------------|:----------:|:--------------------:|------------------------------------------------------------------|
 
 
 ## sim2sim Transfer
@@ -244,23 +228,3 @@ Some examples of packages that can likely be excluded are:
 "<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
 ...
 ```
-
-## Run G1 From A Checkpoint
-Run
-```
-python /robot_rl/scripts/rsl_rl/play.py --task=G1-flat-vel --num_envs=10 --checkpoint=<log_dir_checkpoint>
-
-```
-## AMBER 
-Train
-```
-python scripts/rsl_rl/train.py --task="Amber-flat-vel"  --num_envs=4096
-```
-
-Run
-```
-python scripts/rsl_rl/play.py --task="Amber-flat-vel"  --num_envs=1
-```
-## Other Deps
-pygame
-mujoco
