@@ -1,41 +1,49 @@
-#use the same play config,but use different trained policy
-#based on the specific envrionment specifyed, use the corresponding trained policy
-
-
-task = "custom-Isaac-Velocity-Flat-G1-Play-v0"
-
-#load different trained policy based on the env
-
-# "vanilla","custom","clf"
+#!/usr/bin/env python3
+# =============================================================================
+#  play_policy.py
+#  ---------------------------------------------------------------------------
+#  Play back one **or many** trained RSL-RL policies in Isaac Lab, saving
+#  optional videos, trajectory data and plots.
+#
+#  Usage (single policy)
+#  ---------------------
+#  python play_policy.py \
+#      --policy_paths logs/g1_policies/custom/g1/run_A/model_400.pt \
+#      --env_type custom --video
+#
+#  Usage (multiple policies, headless)
+#  -----------------------------------
+#  python play_policy.py \
+#      --policy_paths \
+#          logs/g1_policies/custom/g1/run_A/model_400.pt \
+#          logs/g1_policies/custom/g1/run_B/model_600.pt \
+#      --env_type custom --headless --video_length 600
+#
+#  Any extra RSL-RL / AppLauncher flags may be appended as usual.
+# =============================================================================
 
 import argparse
+import glob
+import subprocess
 import os
+import pickle
 import sys
 import time
-import pickle
-import glob
+from dataclasses import dataclass
+from typing import List, Sequence
+import matplotlib.pyplot as plt
 
+import torch
 from isaaclab.app import AppLauncher
 import cli_args
-import torch
 
-# Import plot_trajectories functions
-from plot_trajectories import plot_trajectories, plot_hzd_trajectories
-from train_policy import ENVIRONMENTS
-# Experiment names mapping for different environments
-EXPERIMENT_NAMES = {
-    "vanilla": "g1_isaac",
-    "custom": "g1",
-    "clf": "g1",
-    "ref_tracking": "g1",
-    "stair": "g1",
-    "clf_vdot": "g1",
-    "height-scan-flat": "g1"
-}
+# -----------------------------------------------------------------------------#
+#  Constants                                                                    #
+# -----------------------------------------------------------------------------#
 
 SIM_ENVIRONMENTS = {
     "vanilla": "custom-Isaac-Velocity-Flat-G1-Play-v0",
-    "custom": "custom-Isaac-Velocity-Flat-G1-Play-v0",
+    "custom": "G1-flat-vel-play",
     "clf": "G1-flat-ref-play",
     "ref_tracking": "G1-flat-ref-play",
     "clf_vdot": "G1-flat-ref-play",
@@ -43,420 +51,430 @@ SIM_ENVIRONMENTS = {
     "height-scan-flat": "G1-height-scan-flat-play",
 }
 
+EXPERIMENT_NAMES = {
+    "vanilla": "g1_isaac",
+    "custom": "g1",
+    "clf": "g1",
+    "ref_tracking": "g1",
+    "clf_vdot": "g1",
+    "stair": "g1",
+    "height-scan-flat": "g1",
+}
+
+# -----------------------------------------------------------------------------#
+#  Simple data-logger                                                           #
+# -----------------------------------------------------------------------------#
+
+# -------------------------------------------------------------
+#  Hard-wired DataLogger  (records base_velocity + root_pos)
+# -------------------------------------------------------------
+import torch, pickle, os
+
+
 class DataLogger:
-    def __init__(self, enabled=True, log_dir=None, variables=None):
+    def __init__(self, enabled=True, log_dir=None):
         self.enabled = enabled
-        self.data = {}
         self.log_dir = log_dir
-        self.variables = variables or []
-        
+        self.data = {"base_velocity": [], "root_pos": []}
+
         if enabled and log_dir:
             os.makedirs(log_dir, exist_ok=True)
-            print(f"[INFO] Logging data to directory: {log_dir}")
-            # Initialize data storage for each variable
-            for var in self.variables:
-                self.data[var] = []
-    
-    def log_from_dict(self, data_dict):
-        """Log data from a dictionary, only logging variables that were specified in initialization"""
+            print(f"[INFO] Logging data to {log_dir}")
+
+    # ------------------------------------------------------------------
+    def log_step(self, base_vel, root_pos):
+        """Append one timestep of data (tensors or arrays)."""
         if not self.enabled:
             return
-            
-        for var in self.variables:
-            if var in data_dict:
-                self.data[var].append(data_dict[var])
-    
+        self.data["base_velocity"].append(base_vel)
+        self.data["root_pos"].append(root_pos)
+
+    # ------------------------------------------------------------------
     def save(self):
-        """Save all logged data to pickle files"""
-        if not self.enabled or not self.log_dir:
+        if not (self.enabled and self.log_dir):
             return
-            
-        for var in self.variables:
-            if var in self.data:
-                filepath = os.path.join(self.log_dir, f"{var}.pkl")
-                with open(filepath, "wb") as f:
-                    pickle.dump(self.data[var], f)
-                print(f"[INFO] Saved {var} data to {filepath}")
+
+        for var, entries in self.data.items():
+            cleaned = [
+                x.detach().cpu().tolist() if isinstance(x, torch.Tensor) else x
+                for x in entries
+            ]
+            path = os.path.join(self.log_dir, f"{var}.pkl")
+            with open(path, "wb") as fh:
+                pickle.dump(cleaned, fh)
+            print(f"[INFO] Saved '{var}' to {path}")
 
 
-def parse_sim_speed(value):
+
+# -----------------------------------------------------------------------------#
+#  CLI                                                                          #
+# -----------------------------------------------------------------------------#
+
+
+def _parse_sim_speed(txt: str) -> list[float]:
     try:
-        # Split the input string by commas and convert each value to float
-        return [float(x) for x in value.split(',')]
-    except:
-        raise argparse.ArgumentTypeError("Sim speed must be comma-separated floats (e.g. '1.0,0.0,0.0')")
+        return [float(x) for x in txt.split(",")]
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            "sim_speed must be comma-separated floats, e.g. '1.0,0.0,0.0'"
+        ) from err
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Play trained RL policies for different environments.")
-    parser.add_argument(
-        "--env_type",
-        type=str,
-        choices=list(ENVIRONMENTS.keys()),
-        help="Type of environment to play (vanilla/custom/clf)"
+
+def get_args():
+    p = argparse.ArgumentParser(
+        description="Play one or many trained policies in Isaac Lab."
     )
-    parser.add_argument(
+
+    # core
+    p.add_argument(
+        "--env_type", required=True, choices=SIM_ENVIRONMENTS, help="Environment label"
+    )
+    p.add_argument(
+        "--policy_paths",
+        nargs="+",
+        metavar="PATH",
+        help="Checkpoint file(s) (.pt) OR run directories. "
+        "If omitted, the newest checkpoint in the experiment folder is used.",
+    )
+    p.add_argument(
         "--exp_name",
-        type=str,
-        default=None,
-        help="Override the default experiment name for the environment type"
-    )
-    parser.add_argument(
-        "--video",
-        action="store_true",
-        default=True,
-        help="Record videos during playback."
-    )
-    parser.add_argument(
-        "--video_length",
-        type=int,
-        default=400,
-        help="Length of the recorded video (in steps)."
-    )
-    parser.add_argument(
-        "--num_envs",
-        type=int,
-        default=None,
-        help="Number of environments to simulate."
-    )
-    parser.add_argument(
-        "--real-time",
-        action="store_true",
-        default=False,
-        help="Run in real-time, if possible."
+        help="Override default experiment name (folder inside logs/…)",
     )
 
-    parser.add_argument(
-        "--export_policy",
-        action="store_true",
-        default=False,
-        help="Export the policy to ONNX and JIT formats."
+    # playback options
+    p.add_argument("--video", action="store_true", default=False)
+    p.add_argument("--video_length", type=int, default=400)
+    p.add_argument("--real_time", action="store_true", default=False)
+    p.add_argument("--num_envs", type=int)
+    p.add_argument("--sim_speed", type=_parse_sim_speed)
+
+    # data logging
+    p.add_argument("--log_data", action="store_true", default=False)
+    p.add_argument("--play_log_dir", type=str)
+
+    # export network
+    p.add_argument("--export_policy", action="store_true", default=False)
+
+    p.add_argument("--plot_graphs", action="store_true", default=False,
+                   help="After playback, draw 6 graphs from the logger .pkl files.")
+
+    # passthrough
+    cli_args.add_rsl_rl_args(p)
+    AppLauncher.add_app_launcher_args(p)
+
+    return p.parse_known_args()
+
+
+# -----------------------------------------------------------------------------#
+#  Helpers                                                                      #
+# -----------------------------------------------------------------------------#
+
+
+def newest_checkpoint(run_dir: str) -> str | None:
+    files = glob.glob(os.path.join(run_dir, "model_*.pt"))
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def newest_run(exp_root: str) -> str | None:
+    runs = glob.glob(os.path.join(exp_root, "*"))
+    return max(runs, key=os.path.getmtime) if runs else None
+
+
+def make_comparison_plots(play_dirs: list[str]) -> None:
+    import pickle
+
+    base_keys = ["vx", "vy", "vz", "root_x", "root_y", "root_z"]
+    titles    = ["Velocity X", "Velocity Y", "Velocity Z",
+                 "Root X",     "Root Y",     "Root Z"]
+
+    series = {k: [] for k in base_keys}
+
+    # read every run’s pickles -----------------------------------------
+    for play_dir in play_dirs:
+        label = os.path.basename(os.path.dirname(play_dir))   # “run_A”, …
+        with open(os.path.join(play_dir, "base_velocity.pkl"), "rb") as fh:
+            vel_raw = pickle.load(fh)
+        with open(os.path.join(play_dir, "root_pos.pkl"), "rb") as fh:
+            pos_raw = pickle.load(fh)
+
+        vel = torch.tensor(vel_raw).mean(dim=1)   # (T,3)
+        pos = torch.tensor(pos_raw).mean(dim=1)   # (T,3)
+
+        for i, k in enumerate(("vx", "vy", "vz")):
+            series[k].append((label, vel[:, i].tolist()))
+        for i, k in enumerate(("root_x", "root_y", "root_z")):
+            series[k].append((label, pos[:, i].tolist()))
+
+    # one figure per component -----------------------------------------
+    suffix = "_".join(os.path.basename(os.path.dirname(d)) for d in play_dirs)
+    out_dir = os.path.join(os.getcwd(), "comparison_plots")
+    os.makedirs(out_dir, exist_ok=True)
+
+    for key, title in zip(base_keys, titles):
+        plt.figure()
+        for lbl, data in series[key]:
+            plt.plot(data, label=lbl)
+        plt.xlabel("timestep")
+        plt.ylabel(title)
+        plt.title(title)
+        plt.legend()
+        outfile = os.path.join(out_dir, f"{key}_{suffix}.png")
+        plt.savefig(outfile, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"[INFO] Plot saved → {outfile}")
+
+
+def find_all_play_dirs(active_run_dir: str) -> list[str]:
+    """
+    Return every sibling “…/playback” directory (including *this* run) that
+    already contains both base_velocity.pkl and root_pos.pkl.  They all live
+    one level above the timestamped run directory.
+    """
+    parent_dir = os.path.dirname(active_run_dir)         # …/g1/<runs…>/
+    play_dirs: list[str] = []
+
+    for entry in os.scandir(parent_dir):
+        if not entry.is_dir():
+            continue
+        cand = os.path.join(entry.path, "playback")
+        if os.path.isfile(os.path.join(cand, "base_velocity.pkl")) and \
+           os.path.isfile(os.path.join(cand, "root_pos.pkl")):
+            play_dirs.append(cand)
+
+    return sorted(play_dirs)
+
+
+
+# -----------------------------------------------------------------------------#
+#  Main                                                                         #
+# -----------------------------------------------------------------------------#
+
+
+# -----------------------------------------------------------------------------#
+#  Main                                                                         #
+# -----------------------------------------------------------------------------#
+def main() -> None:
+    args, hydra_tail = get_args()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 1) Detect whether we were given more than one policy checkpoint
+    # ─────────────────────────────────────────────────────────────────────────
+    multi_run = len(args.policy_paths or []) > 1
+
+    # Flags that every (sub-)process should receive
+    common_flags = [
+        "--env_type", args.env_type,
+        "--log_data",           # guarantees that *.pkl files are written out
+    ]
+
+    # In the single-policy case we can show graphs immediately
+    if not multi_run and args.plot_graphs:
+        common_flags.append("--plot_graphs")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 2) Multi-policy sweep: spawn this very script once per checkpoint,
+    #    wait for them to finish, then generate the combined plots and exit.
+    # ─────────────────────────────────────────────────────────────────────────
+    if multi_run:
+        play_dirs: list[str] = []
+
+        for ckpt in args.policy_paths:
+            run_dir  = os.path.dirname(ckpt)
+            out_dir  = os.path.join(run_dir, "playback")
+            play_dirs.append(out_dir)
+
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),     # recursively call *this* script
+                "--policy_paths", ckpt,        # one checkpoint at a time
+                "--play_log_dir", out_dir,     # write logs to that folder
+                *common_flags,
+            ]
+            subprocess.run(cmd, check=True)
+
+        # once all children have finished we can aggregate their logs
+        if args.plot_graphs:
+            make_comparison_plots(play_dirs)
+
+        # important: prevent the parent from running the single-policy logic
+        sys.exit(0)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 3) Single-policy run — continue with the original code path
+    # ─────────────────────────────────────────────────────────────────────────
+    # (Everything below this point is unchanged from your original file)
+    # -----------------------------------------------------------------------
+    # Absolute path to play root (logs/…)
+    exp_name = args.exp_name or EXPERIMENT_NAMES[args.env_type]
+    exp_root = os.path.abspath(
+        os.path.join("logs", "g1_policies", args.env_type, exp_name)
     )
 
-    parser.add_argument(
-        "--sim_speed",
-        type=parse_sim_speed,
-        default=None,
-        help="Simulation speed as comma-separated values for x,y,z velocities (e.g. '1.0,0.0,0.0')."
+    # ------------------------------------------------------------------#
+    #  Resolve list of checkpoints                                      #
+    # ------------------------------------------------------------------#
+    if args.policy_paths:
+        ckpts: list[str] = [os.path.abspath(p) for p in args.policy_paths]
+    else:
+        run_dir = newest_run(exp_root)
+        if not run_dir:
+            sys.exit(f"[ERROR] No run directories found in {exp_root}")
+        ckpt = newest_checkpoint(run_dir)
+        if not ckpt:
+            sys.exit(f"[ERROR] No checkpoints in latest run {run_dir}")
+        ckpts = [ckpt]
+
+    # sanity-check paths
+    for c in ckpts:
+        if not os.path.exists(c):
+            sys.exit(f"[ERROR] Checkpoint not found: {c}")
+
+    # ------------------------------------------------------------------#
+    #  Launch Isaac Lab once                                            #
+    # ------------------------------------------------------------------#
+    sys.argv = [sys.argv[0]] + hydra_tail  # so hydra sees only its args
+    if args.video:
+        args.enable_cameras = True  # AppLauncher flag
+
+    app = AppLauncher(args).app
+
+    # late imports
+    import gymnasium as gym
+    import torch
+    from isaaclab_tasks.utils import parse_env_cfg, get_checkpoint_path
+    from isaaclab_rl.rsl_rl import (
+        RslRlVecEnvWrapper,
+        RslRlOnPolicyRunnerCfg,
+        export_policy_as_onnx,
+        export_policy_as_jit,
     )
+    from robot_rl.network.custom_policy_runner import CustomOnPolicyRunner
+    from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 
-    parser.add_argument(
-        "--play_log_dir",
-        type=str,
-        default = None,
-        help="export directory "
-    )
+    # pytorch knobs
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
-    parser.add_argument(
-        "--log_data",
-        action="store_true",
-        default=False,
-        help="Log data during playback."
-    )
-    # append RSL-RL cli arguments
-    cli_args.add_rsl_rl_args(parser)
-    # append AppLauncher cli args
-    AppLauncher.add_app_launcher_args(parser)
-    return parser.parse_known_args()
+    # env-wide constants
+    task_name = SIM_ENVIRONMENTS[args.env_type]
+    dt_env_cfg = parse_env_cfg(task_name, device=args.device, num_envs=args.num_envs)
 
+    if args.sim_speed:
+        vx, vy, wz = args.sim_speed + [0.0] * (3 - len(args.sim_speed))
+        dt_env_cfg.commands.base_velocity.ranges.lin_vel_x = (vx, vx)
+        dt_env_cfg.commands.base_velocity.ranges.lin_vel_y = (vy, vy)
+        dt_env_cfg.commands.base_velocity.ranges.ang_vel_z = (wz, wz)
 
-def extract_reference_trajectory(env, log_vars):
-    # Get the underlying environment by unwrapping
-    unwrapped_env = env.unwrapped
+    # ------------------------------------------------------------------#
+    #  Loop over checkpoints                                            #
+    # ------------------------------------------------------------------#
+    for n, ckpt in enumerate(ckpts, 1):
+        print(f"\n━━━ [{n}/{len(ckpts)}] ▶ {ckpt}")
 
-    cfg_name = type(env.cfg).__name__
+        # derive play-specific log dir
+        run_dir = os.path.dirname(ckpt)
+        play_dir = args.play_log_dir or os.path.join(run_dir, "playback")
+        os.makedirs(play_dir, exist_ok=True)
 
-    ref = unwrapped_env.command_manager.get_term("hlip_ref")
-    results = {}
-
-    for var in log_vars:
-        if hasattr(ref, var):
-            val = getattr(ref, var)
-            results[var] = val.clone() if isinstance(val, torch.Tensor) else val
-        elif var in ref.metrics:
-            results[var] = ref.metrics[var]
-        elif var == "base_velocity":
-            results[var] = unwrapped_env.command_manager.get_command("base_velocity")
-        else:
-            results[var] = None  # or raise an error/warning if you prefer
-
-    return results
-
-
-def find_latest_checkpoint(log_root_path):
-    """Find the latest checkpoint in the given directory."""
-    # Find all run directories
-    run_dirs = glob.glob(os.path.join(log_root_path, "*"))
-    if not run_dirs:
-        return None, None
-    
-    # Get the latest run directory
-    latest_run = max(run_dirs, key=os.path.getmtime)
-    
-    # Find all checkpoint files in the latest run
-    checkpoint_files = glob.glob(os.path.join(latest_run, "model_*.pt"))
-    if not checkpoint_files:
-        return None, None
-    
-    # Get the latest checkpoint
-    latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
-    checkpoint_num = int(os.path.basename(latest_checkpoint).split("_")[1].split(".")[0])
-    run_name = os.path.basename(latest_run)
-    
-    return run_name, checkpoint_num
-
-
-def main():
-    args_cli, hydra_args = parse_args()
-    
-    if not args_cli.env_type:
-        print("Please specify an environment type using --env_type")
-        print("Available options:", list(ENVIRONMENTS.keys()))
-        sys.exit(1)
-
-    print("[DEBUG] Starting main function")
-    # Set the task based on environment type
-    args_cli.task = SIM_ENVIRONMENTS[args_cli.env_type]
-    print(f"[DEBUG] Using task: {args_cli.task}")
-    
-    # Get experiment name (use override if provided, otherwise use default)
-    experiment_name = args_cli.exp_name or EXPERIMENT_NAMES[args_cli.env_type]
-    print(f"[DEBUG] Using experiment name: {experiment_name}")
-    
-    # always enable cameras to record video
-    if args_cli.video:
-        args_cli.enable_cameras = True
-
-    # clear out sys.argv for Hydra
-    sys.argv = [sys.argv[0]] + hydra_args
-
-    print("[DEBUG] Launching Omniverse app")
-    # launch omniverse app
-    app_launcher = AppLauncher(args_cli)
-    simulation_app = app_launcher.app
-    print("[DEBUG] Omniverse app launched")
-
-    try:
-        print("[DEBUG] Importing required modules")
-        # Import necessary modules after app launch
-        import gymnasium as gym
-        import torch
-        # from rsl_rl.runners import OnPolicyRunner
-        from robot_rl.network.custom_policy_runner import CustomOnPolicyRunner
-    
-        from isaaclab.envs import (
-            DirectMARLEnv,
-            multi_agent_to_single_agent,
-        )
-        from isaaclab.utils.dict import print_dict
-        from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
-        from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-        from isaaclab_rl.rsl_rl import export_policy_as_jit, export_policy_as_onnx
-        import robot_rl.tasks  # noqa: F401
-        print("[DEBUG] Modules imported successfully")
-
-        # Configure PyTorch
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = False
-
-        print("[DEBUG] Parsing configurations")
-        # parse configuration
-        env_cfg = parse_env_cfg(
-            args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs
-        )
-
-        if args_cli.sim_speed is not None:
-            env_cfg.commands.base_velocity.ranges.lin_vel_x = (args_cli.sim_speed[0], args_cli.sim_speed[0])
-            env_cfg.commands.base_velocity.ranges.lin_vel_y = (args_cli.sim_speed[1], args_cli.sim_speed[1])
-            env_cfg.commands.base_velocity.ranges.ang_vel_z = (args_cli.sim_speed[2], args_cli.sim_speed[2])
-
-        agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
-        print("[DEBUG] Configurations parsed")
-
-        # specify directory for logging experiments
-        if args_cli.env_type == "exo_hzd" or args_cli.env_type == "exo_hlip":
-            log_root_path = os.path.join("logs", "exo_policies", args_cli.env_type, experiment_name)
-        else:
-            log_root_path = os.path.join("logs", "g1_policies", args_cli.env_type, experiment_name)
-        log_root_path = os.path.abspath(log_root_path)
-        print(f"[DEBUG] Log root path: {log_root_path}")
-        
-        # If no checkpoint is specified, find the latest one
-        if not agent_cfg.load_run or not agent_cfg.load_checkpoint:
-            print("[DEBUG] Finding latest checkpoint")
-            latest_run, latest_checkpoint = find_latest_checkpoint(log_root_path)
-            if latest_run and latest_checkpoint:
-                print(f"[DEBUG] Found latest checkpoint: run={latest_run}, checkpoint={latest_checkpoint}")
-                agent_cfg.load_run = latest_run
-                agent_cfg.load_checkpoint = latest_checkpoint
-            else:
-                print("[ERROR] No checkpoints found in the specified directory")
-                sys.exit(1)
-        
-        # Get checkpoint path from the training directory
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        print(f"[DEBUG] Checkpoint path: {resume_path}")
-        
-        # Use the checkpoint directory for saving results
-        if not args_cli.play_log_dir:
-            play_log_dir = os.path.dirname(resume_path)
-        else:
-            play_log_dir = args_cli.play_log_dir
-        
-        print(f"[DEBUG] Play log directory: {play_log_dir}")
-
-        # create isaac environment
-        if hasattr(env_cfg, "__prepare_tensors__") and callable(getattr(env_cfg, "__prepare_tensors__")):
+        # clone / reset env_cfg each iteration
+        from isaaclab_tasks.utils import parse_env_cfg
+        env_cfg = parse_env_cfg(task_name, device=args.device, num_envs=args.num_envs)
+        if hasattr(env_cfg, "__prepare_tensors__"):
             env_cfg.__prepare_tensors__()
-        env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
-        # convert to single-agent instance if required
+        env = gym.make(
+            task_name,
+            cfg=env_cfg,
+            render_mode="rgb_array" if args.video else None,
+        )
         if isinstance(env.unwrapped, DirectMARLEnv):
             env = multi_agent_to_single_agent(env)
-
-        # wrap for video recording
-        if args_cli.video:
-            video_kwargs = {
-                "video_folder": os.path.join(play_log_dir, "videos"),
-                "step_trigger": lambda step: step == 0,
-                "video_length": args_cli.video_length,
-                "disable_logger": True,
-            }
-            print("[DEBUG] Setting up video recording")
-            print_dict(video_kwargs, nesting=4)
-            env = gym.wrappers.RecordVideo(env, **video_kwargs)
-
-        # wrap around environment for rsl-rl
-        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-        print(f"[DEBUG] Loading model checkpoint from: {resume_path}")
-        # load previously trained model
-        ppo_runner = CustomOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        ppo_runner.load(resume_path)
-
-        # obtain the trained policy for inference
-        policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
-  
-        # Export policy if requested
-        if args_cli.export_policy:
-            print("[DEBUG] Exporting policy to ONNX and JIT formats")
-            try:
-                # version 2.3 onwards
-                policy_nn = ppo_runner.alg.policy
-            except AttributeError:
-                # version 2.2 and below
-                policy_nn = ppo_runner.alg.actor_critic
-
-            # export policy to onnx/jit
-            export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-            os.makedirs(export_model_dir, exist_ok=True)
-            export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
-            export_policy_as_onnx(
-                policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
-            )
-            print(f"[DEBUG] Policy exported to {export_model_dir}")
-
-        dt = env.unwrapped.step_dt
-
-
-        log_vars = [
-            'y_out',
-            'dy_out',
-            'base_velocity',
-            'cur_swing_time',
-            "stance_foot_pos",
-            "stance_foot_ori",
-            'y_act',
-            'dy_act',
-            'v',
-            'vdot',
-            'stance_foot_pos_0',
-            'stance_foot_ori_0',
-            "error_sw_x",
-            "error_sw_y",
-            "error_sw_z",
-            "error_sw_roll",
-            "error_sw_pitch",
-            "error_sw_yaw",
-            "error_com_x",
-            "error_com_y",
-            "error_com_z",
-            "error_pelvis_roll",
-            "error_pelvis_pitch",
-            "error_pelvis_yaw" 
-        ]
-        
-        # Setup logging
-        logger = DataLogger(enabled=True, log_dir=play_log_dir, variables=log_vars)
-
-        # reset environment
-        obs, _ = env.get_observations()
-        timestep = 0
-        print("[DEBUG] Starting simulation loop")
-
-        # viewer = env.unwrapped.scene.viewer
-
-        # Choose the robot's prim path
-        # robot_prim_path = "/World/robot"  # Or your robot's actual path
-
-        # Set the camera to follow the robot
-        # viewer.set_camera_follow(robot_prim_path)
-        # simulate environment
-        while simulation_app.is_running():
-            start_time = time.time()
-            # run everything in inference mode
-            with torch.inference_mode():
-                # agent stepping
-                actions = policy(obs)
-                # env stepping
-                obs, reward, _, extra = env.step(actions)
-                
-                # Log data
-                if args_cli.log_data:
-                    data = extract_reference_trajectory(env, log_vars)
-                    logger.log_from_dict(data)
-
-            timestep += 1
-            if args_cli.video:
-                # Exit the play loop after recording one video
-                if timestep == args_cli.video_length:
-                    break
             
-            if timestep > max(100, args_cli.video_length):
+            
+                # video wrapper
+        if args.video:
+            env = gym.wrappers.RecordVideo(
+                env,
+                video_folder=os.path.join(play_dir, "videos"),
+                step_trigger=lambda step: step == 0,
+                video_length=args.video_length,
+                disable_logger=True,
+            )
+        
+        runner_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(task_name, args)
+        # Determine a numeric clipping bound (or None)
+        clip_val = runner_cfg.clip_actions
+        if isinstance(clip_val, bool):          # True → default to 1.0, False → None
+            clip_val = 1.0 if clip_val else None
+
+        env = RslRlVecEnvWrapper(env, clip_actions=clip_val)
+
+
+
+        # prepare RSL-RL runner
+        runner = CustomOnPolicyRunner(env, runner_cfg.to_dict(), log_dir=None, device=runner_cfg.device)
+        runner.load(ckpt)
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+
+        # optional export
+        if args.export_policy:
+            export_dir = os.path.join(play_dir, "exported")
+            os.makedirs(export_dir, exist_ok=True)
+            try:
+                policy_net = runner.alg.policy  # RSL-RL ≥2.3
+            except AttributeError:
+                policy_net = runner.alg.actor_critic
+            export_policy_as_jit(policy_net, runner.obs_normalizer, export_dir, "policy.pt")
+            export_policy_as_onnx(policy_net, runner.obs_normalizer, export_dir, "policy.onnx")
+
+        # data logger
+        log_vars = ["base_velocity", "robot"]
+        logger = DataLogger(enabled=args.log_data or args.plot_graphs, log_dir=play_dir)
+
+        # ------------------------------------------------------------------#
+        #  Simulation loop                                                  #
+        # ------------------------------------------------------------------#
+        obs, _ = env.reset()               # ← kicks-off recording
+        obs, _ = env.get_observations()
+        dt = env.unwrapped.step_dt
+        frame = 0
+        while app.is_running():
+            tic = time.time()
+            with torch.inference_mode():
+                act = policy(obs)
+                obs, _, _, info = env.step(act)
+                if args.log_data:
+                    # minimal example; extend as needed
+                    cmd_vel = env.unwrapped.command_manager.get_command("base_velocity")
+                    root_pos = env.unwrapped.scene["robot"].data.root_pos_w
+                    logger.log_step(cmd_vel.clone(), root_pos.clone())
+
+            frame += 1
+            if args.video and frame >= args.video_length:
+                break
+            if frame >= max(100, args.video_length):  # safety stop
                 break
 
-            # time delay for real-time evaluation
-            sleep_time = dt - (time.time() - start_time)
-            if args_cli.real_time and sleep_time > 0:
-                time.sleep(sleep_time)
+            if args.real_time:
+                time.sleep(max(0.0, dt - (time.time() - tic)))
 
-        print("[DEBUG] Simulation loop ended")
-        # close the simulator
         env.close()
 
-        # Save all logged data
-        if args_cli.log_data:
+        if args.log_data:
             logger.save()
-
-            # Create plots directory and generate plots
-            plot_dir = os.path.join(play_log_dir, "plots")
-            os.makedirs(plot_dir, exist_ok=True)
-            print(f"[DEBUG] Generating plots in directory: {plot_dir}")
             
-            
-            plot_trajectories(logger.data, save_dir=plot_dir)
+        if args.plot_graphs:
+            play_dirs_ready = find_all_play_dirs(run_dir)
 
-    except Exception as e:
-        print(f"[ERROR] An error occurred: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Ensure simulation app is closed
-        if simulation_app is not None:
-            simulation_app.close()
-            print("[DEBUG] Simulation app closed")
+            if len(play_dirs_ready) >= 2:
+                # overwrite / refresh the 6 composite figures
+                make_comparison_plots(play_dirs_ready)
+            elif len(play_dirs_ready) == 1:
+                # still useful to have single-run plots while waiting
+                make_comparison_plots(play_dirs_ready)
 
+    app.close()
+    print("\nAll playbacks done.")
 
 if __name__ == "__main__":
     main()
