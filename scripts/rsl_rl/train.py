@@ -135,15 +135,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    # create isaac environment : Uncomment for G1-------------------------------------------------------------------
+    # env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
-    #EXTRA CODE : COMMENT FOR G1------------------------------------------------------------------------------------------
-    # base_env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    #EXTRA CODE : COMMENT FOR G1 : This code will reset an env with nan in its policy-------------------------------
+    base_env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     # wrap to catch any NaN or super‐large rewards and reset those sub‐envs immediately
-    # from robot_rl.wrappers.nan_reset_wrapper import NaNResetWrapper
-    # from robot_rl.tasks.manager_based.robot_rl.amber.amber_env import NaNResetWrapper
-    # env = NaNResetWrapper(base_env, vel_threshold=5000.0)
+    from robot_rl.tasks.manager_based.robot_rl.amber.amber_env import NaNResetWrapper
+    env = NaNResetWrapper(base_env, vel_threshold=5000.0)
 
 
 

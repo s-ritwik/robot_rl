@@ -493,35 +493,46 @@ def contact_no_vel(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg = 
 
 def track_joint_angles_exp(
     env: ManagerBasedRLEnv,
-    std: float,
+    std: float = 0.05,           # controls steepness of the exponential
+    threshold_deg: float = 15.0, # degrees beyond which penalty starts
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward small joint angles using an exponential kernel (penalizes large angles)."""
-    # grab the robot’s RigidObject
-    asset: RigidObject = env.scene[asset_cfg.name]
-    # if not hasattr(track_joint_angles_exp, "_printed"):
-    #     # try the standard dof_names, otherwise fall back to the init_state mapping
-    #     try:
-    #         joint_names = asset.dof_names
-    #     except AttributeError:
-    #         joint_names = list(asset.cfg.init_state.joint_pos.keys())
-    #     print(f"[track_joint_angles_exp] controlling joints: {joint_names}")
-    #     track_joint_angles_exp._printed = True
+    """
+    Exponentially penalize only q1_left, q2_left, q1_right, q2_right when they
+    exceed ±threshold_deg, with penalty = exp((|θ|–threshold_rad)/std) – 1, otherwise zero.
+    Returns a [num_envs] tensor of summed penalties.
+    """
+    # 1) grab the articulation
+    asset = env.scene[asset_cfg.name]
 
-    # this tensor is [num_envs, num_joints]
-    joint_pos = asset.data.joint_pos
+    # 2) get the ordering of joint names
+    try:
+        joint_names = asset.dof_names
+    except AttributeError:
+        try:
+            joint_names = asset.joint_names
+        except AttributeError:
+            joint_names = list(asset.cfg.init_state.joint_pos.keys())
 
-    # sum of squared angles across all controlled joints
-    angle_error = torch.sum(torch.square(joint_pos), dim=1)
+    # 3) select our four target joints
+    target = ["q1_left", "q2_left", "q1_right", "q2_right"]
+    idxs   = [joint_names.index(n) for n in target]
 
-    # safeguard
-    std = max(std, 1e-4)
+    # 4) pull their angles (radians)
+    joint_pos = asset.data.joint_pos        # [N, D]
+    angles    = joint_pos[:, idxs]          # [N, 4]
 
-    # exponential kernel (clamp to avoid overflow)
-    out = -angle_error / std**2
-    out = torch.clamp(out, -50, 50)
-    out = torch.exp(out)
-    return out
+    # 5) compute excess beyond ±threshold
+    thresh_rad = math.radians(threshold_deg)
+    excess     = torch.relu(angles.abs() - thresh_rad)  # [N,4]
+
+    # 6) exponential penalty per joint
+    pen = torch.exp(excess / std) - 1.0                  # [N,4]
+
+    # 7) sum across the four joints
+    penalty = pen.sum(dim=1)                             # [N]
+    penalty = torch.clamp(penalty,0,50)
+    return penalty
 
 
 def foot_phase_contact(
@@ -658,29 +669,40 @@ def symmetric_phase_contact_amber(
     return out
 
 
-def torso_rotation_cost(
+def torso_rotation_term(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["torso"]),
+    reward_window_deg: float = 7.0,     # degrees for positive reward
+    penalty_threshold_deg: float = 15.0,# degrees beyond which penalty applies
+    penalty_cap: float = 20.0,          # max exp(θ_deg)
 ) -> torch.Tensor:
     """
-    Cost = squared rotation‐angle of the torso link away from world upright.
-    Assumes quaternion format [w, x, y, z] in asset.data.body_quat_w.
-    Returns a [num_envs] tensor of nonnegative costs.
+    +2 reward when |tilt| ≤ reward_window_deg,
+    –min(exp(|tilt_deg|), penalty_cap) penalty when |tilt| > penalty_threshold_deg,
+    0 otherwise.
+
+    Tilt angle = 2*acos(w) from body_quat_w, converted to degrees.
     """
-    # grab the articulation
+    # get torso quaternion
     asset = env.scene[asset_cfg.name]
-    # pick out the torso quaternion: shape [N, 1, 4] → [N, 4]
-    quat = asset.data.body_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
-    # w is first component
-    w = quat[:, 0]
-    # clamp for acos domain stability
-    w = torch.clamp(w, -1.0, 1.0)
-    # rotation magnitude (rad): 2·acos(w)
-    angle = 2.0 * torch.acos(w)
-    # print(angle)
-    # squared penalty
-    cost = angle**2
-    return cost
+    quat  = asset.data.body_quat_w[:, asset_cfg.body_ids, :].squeeze(1)  # [N,4]
+    w     = torch.clamp(quat[:,0], -1.0, 1.0)
+    angle_rad = 2.0 * torch.acos(w)               # [N]
+    angle_deg = angle_rad * (180.0 / torch.pi)    # [N]
+
+    # positive reward region
+    within = angle_deg.abs() <= reward_window_deg
+    reward = torch.where(within, torch.tensor(2.0, device=env.device), torch.tensor(0.0, device=env.device))
+
+    # penalty region
+    outside = angle_deg.abs() > penalty_threshold_deg
+    pen_val = -torch.clamp(torch.exp(angle_deg.abs()), max=penalty_cap)
+    penalty = torch.where(outside, pen_val, torch.tensor(0.0, device=env.device))
+
+    # combine
+    result = reward + penalty
+    # print(result)
+    return result
 
 
 def alternation_contact_reward(
@@ -753,6 +775,7 @@ def alternation_contact_reward(
     prev_l.copy_(c_l)
     prev_r.copy_(c_r)
     # print(out)
+    out = torch.where(out < 0, out * 5 , out)
     return out
 
 
@@ -800,98 +823,112 @@ def feet_slide_amber(
     penalty = speed_sq_l * c_l.float() + speed_sq_r * c_r.float()
     return penalty
 
-
-def alternative_linear_last_contact(
+def alternative_linear_cycle(
     env: ManagerBasedRLEnv,
     command_name: str,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", body_names=["left_shin", "right_shin"]
-    ),
-    left_sensor_name: str = "contact_forces_left",
+    left_sensor_name: str  = "contact_forces_left",
     right_sensor_name: str = "contact_forces_right",
-    min_cmd_speed: float = 0.05,
-    limit: float = 0.15,
+    min_cmd_speed: float   = 0.05,
+    penalty_bad: float     = -5.0,   # punishment when cycle fails
+    max_step: float        = 0.2,    # cap on forward‐step reward (m)
 ) -> torch.Tensor:
     """
-    Reward = clamp((x_contacting - x_other_last_contact) * sign(cmd_x), 
-                   min=-limit, max=+limit),
-    computed only at the moment one shin contacts *after* the other.
-    The value then holds until the next alternating-contact event.
-    Returns a [num_envs] tensor.
+    On the second alternating foot contact:
+      – If both the first and second steps progressed forward:
+          reward = min((x_second - x_first) * sign(cmd), max_step)
+      – Else:
+          reward = penalty_bad
+    That value fires once per cycle, then holds. Zeroed if |cmd|<min_cmd_speed.
     """
-    N, device = env.num_envs, env.device
-    asset     = env.scene[asset_cfg.name]
-    right_id, left_id = asset_cfg.body_ids   # as per URDF ordering
+    N, dev = env.num_envs, env.device
+    asset  = env.scene["robot"]
 
-    # --- contact flags & rising‐edges ---------------------------------------
+    # 1) rising‐edge detection
     def contact(name):
         fh = env.scene.sensors[name].data.net_forces_w_history
-        return (fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0] > 1.0)
+        return (
+            fh.norm(dim=-1)
+              .max(dim=1)[0]
+              .max(dim=1)[0]
+              > 1.0
+        )
 
-    c_l = contact(left_sensor_name)
-    c_r = contact(right_sensor_name)
+    c_l, c_r = contact(left_sensor_name), contact(right_sensor_name)
 
-    # init persistent prev‐contact buffers
-    if not hasattr(alternative_linear_last_contact, "_prev_l"):
-        alternative_linear_last_contact._prev_l = torch.zeros(N, device=device, dtype=torch.bool)
-        alternative_linear_last_contact._prev_r = torch.zeros(N, device=device, dtype=torch.bool)
-    prev_l = alternative_linear_last_contact._prev_l
-    prev_r = alternative_linear_last_contact._prev_r
+    # initialize on first call
+    if not hasattr(alternative_linear_cycle, "_prev_l"):
+        alternative_linear_cycle._prev_l      = torch.zeros(N, device=dev, dtype=torch.bool)
+        alternative_linear_cycle._prev_r      = torch.zeros(N, device=dev, dtype=torch.bool)
+        alternative_linear_cycle._step        = torch.zeros(N, device=dev, dtype=torch.long)
+        alternative_linear_cycle._first_foot  = torch.full((N,), -1, device=dev, dtype=torch.long)
+        alternative_linear_cycle._first_ok    = torch.zeros(N, device=dev, dtype=torch.bool)
+        alternative_linear_cycle._out         = torch.zeros(N, device=dev)
+    prev_l     = alternative_linear_cycle._prev_l
+    prev_r     = alternative_linear_cycle._prev_r
+    step       = alternative_linear_cycle._step
+    first_foot = alternative_linear_cycle._first_foot
+    first_ok   = alternative_linear_cycle._first_ok
+    out        = alternative_linear_cycle._out
 
-    # rising‐edges: now contact & was not contacting
-    event_l = c_l & ~prev_l
-    event_r = c_r & ~prev_r
-
-    # update prev flags for next call
+    ev_l = c_l & ~prev_l   # new left contact
+    ev_r = c_r & ~prev_r   # new right contact
     prev_l.copy_(c_l)
     prev_r.copy_(c_r)
 
-    # --- persistent storage of last contact‐x & held reward ----------------
-    if not hasattr(alternative_linear_last_contact, "_last_l"):
-        alternative_linear_last_contact._last_l = torch.zeros(N, device=device)
-        alternative_linear_last_contact._last_r = torch.zeros(N, device=device)
-        alternative_linear_last_contact._has_l  = torch.zeros(N, device=device, dtype=torch.bool)
-        alternative_linear_last_contact._has_r  = torch.zeros(N, device=device, dtype=torch.bool)
-        alternative_linear_last_contact._reward = torch.zeros(N, device=device)
-    last_l = alternative_linear_last_contact._last_l
-    last_r = alternative_linear_last_contact._last_r
-    has_l  = alternative_linear_last_contact._has_l
-    has_r  = alternative_linear_last_contact._has_r
-    out    = alternative_linear_last_contact._reward
+    # 2) compute relative x positions & command direction
+    pos     = asset.data.body_pos_w
+    root_x  = pos[:,0,0]
+    B       = pos.shape[1]
+    # body_pos_w rows: [-2]=right, [-1]=left toe
+    rel_l   = pos[:, B-1, 0] - root_x
+    rel_r   = pos[:, B-2, 0] - root_x
 
-    # --- read command and positions ----------------------------------------
-    cmd_x    = env.command_manager.get_command(command_name)[:, 0]
-    dir_sign = torch.sign(cmd_x)                                        # ±1 or 0
-    motion   = (cmd_x.abs() > min_cmd_speed).float()                    # mask
+    cmd_x    = env.command_manager.get_command(command_name)[:,0]
+    dir_sign = torch.sign(cmd_x)
+    moving   = (cmd_x.abs() > min_cmd_speed).float()
 
-    pos      = asset.data.body_pos_w                                    # [N, bodies, 3]
-    x_l_now  = pos[:, left_id,  0]
-    x_r_now  = pos[:, right_id, 0]
-
-    # --- on left‐event ------------------------------------------------------
-    idx = event_l.nonzero(as_tuple=False).squeeze(-1)
+    # 3) first contact in cycle
+    idx = (ev_l & (step == 0)).nonzero(as_tuple=False).flatten()
     if idx.numel():
-        # record this contact position
-        last_l[idx] = x_l_now[idx]
-        if has_r[idx].any():
-            step = (x_l_now[idx] - last_r[idx]) * dir_sign[idx]
-            out[idx] = torch.clamp(step, min=-limit, max=limit)
-        has_l[idx] = True
+        first_foot[idx] = 0
+        first_ok[idx]   = ((rel_l[idx] - rel_r[idx]) * dir_sign[idx]) > 0
+        step[idx]       = 1
 
-    # --- on right‐event -----------------------------------------------------
-    idx = event_r.nonzero(as_tuple=False).squeeze(-1)
+    idx = (ev_r & (step == 0)).nonzero(as_tuple=False).flatten()
     if idx.numel():
-        last_r[idx] = x_r_now[idx]
-        if has_l[idx].any():
-            step = (x_r_now[idx] - last_l[idx]) * dir_sign[idx]
-            out[idx] = torch.clamp(step, min=-limit, max=limit)
-        has_r[idx] = True
+        first_foot[idx] = 1
+        first_ok[idx]   = ((rel_r[idx] - rel_l[idx]) * dir_sign[idx]) > 0
+        step[idx]       = 1
 
-    # --- zero out if not moving --------------------------------------------
-    out = out * motion
+    # 4) second contact completes the cycle
+    # L→R cycle?
+    idx = (ev_r & (step == 1) & (first_foot == 0)).nonzero(as_tuple=False).flatten()
+    if idx.numel():
+        delta    = (rel_r[idx] - rel_l[idx]) * dir_sign[idx]
+        # positive forward → reward = min(Δ, max_step)
+        reward_p = torch.clamp(delta, min=0.0, max=max_step)
+        # negative backward → penalty = max(Δ, -max_step)  (a negative number)
+        penalty_p= torch.clamp(delta, min=-max_step, max=0.0)
+        both_ok  = first_ok[idx] & (delta > 0)
+        out[idx] = torch.where(both_ok, reward_p, penalty_p)
+        step[idx] = 0
 
-    # print(out)
-    return out
+    # R→L cycle?
+    idx = (ev_l & (step == 1) & (first_foot == 1)).nonzero(as_tuple=False).flatten()
+    if idx.numel():
+        delta    = (rel_l[idx] - rel_r[idx]) * dir_sign[idx]
+        reward_p = torch.clamp(delta, min=0.0, max=max_step)
+        penalty_p= torch.clamp(delta, min=-max_step, max=0.0)
+        both_ok  = first_ok[idx] & (delta > 0)
+        out[idx] = torch.where(both_ok, reward_p, penalty_p)
+        step[idx] = 0
+    # out = torch.where(out > 0.0, out * 50.0, out)
+
+    # 5) hold & mask by commanded movement
+    result = out * moving * 100
+    result = torch.where(result < 0.0, result * 10, result)
+    # print(result)
+    return result
 
 
 def alternate_feet_cycle(
@@ -1010,3 +1047,124 @@ def contact_no_vel_amber(
 
     penalty = pen_l + pen_r                                 # [N]
     return penalty
+
+def continuous_contact_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),        # kept for API symmetry
+    left_sensor_name: str  = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+    threshold: float       = 0.10,   # s before penalty starts
+    rate: float            = 10.0,   # grows like exp(rate·(t-τ))
+    min_cmd_speed: float   = 0.05,   # ignore when basically idle
+) -> torch.Tensor:
+    """
+    Penalty = Σ_f  max(0, exp(rate·(t_f – threshold)) – 1),
+    where t_f is the uninterrupted contact duration of foot f.
+    Returns a [num_envs] tensor.   **Use a NEGATIVE weight in RewardCfg.**
+    """
+    N, dev = env.num_envs, env.device
+    dt     = env.step_dt
+
+    # ------------------------------------------------------------------ #
+    # 1) contact flags for each foot
+    # ------------------------------------------------------------------ #
+    def in_contact(sensor_name: str) -> torch.Tensor:          # bool [N]
+        fh = env.scene.sensors[sensor_name].data.net_forces_w_history
+        return (fh
+                .norm(dim=-1)
+                .max(dim=1)[0]      # over history
+                .max(dim=1)[0]      # over bodies
+                > 1.0)
+
+    c_l = in_contact(left_sensor_name)
+    c_r = in_contact(right_sensor_name)
+
+    # ------------------------------------------------------------------ #
+    # 2) keep our own contact timers (seconds)
+    # ------------------------------------------------------------------ #
+    if not hasattr(continuous_contact_penalty, "_timer_l"):
+        continuous_contact_penalty._timer_l = torch.zeros(N, device=dev)
+        continuous_contact_penalty._timer_r = torch.zeros(N, device=dev)
+
+    timer_l = continuous_contact_penalty._timer_l
+    timer_r = continuous_contact_penalty._timer_r
+
+    # update timers: add dt when in contact, reset to 0 when not
+    timer_l.copy_(torch.where(c_l, timer_l + dt, torch.zeros_like(timer_l)))
+    timer_r.copy_(torch.where(c_r, timer_r + dt, torch.zeros_like(timer_r)))
+
+    # ------------------------------------------------------------------ #
+    # 3) exponential cost beyond threshold
+    # ------------------------------------------------------------------ #
+    def exp_cost(t: torch.Tensor) -> torch.Tensor:
+        excess = t - threshold
+        return torch.where(excess > 0,
+                           torch.exp(rate * excess) - 1.0,
+                           torch.zeros_like(t))
+
+    penalty = exp_cost(timer_l) + exp_cost(timer_r)            # [N]
+
+    # ------------------------------------------------------------------ #
+    # 4) zero out when robot is hardly moving
+    # ------------------------------------------------------------------ #
+    cmd_x = env.command_manager.get_command("base_velocity")[:, 0]
+    moving_mask = (cmd_x.abs() > min_cmd_speed).float()
+    penalty = penalty * moving_mask
+    penalty = torch.clamp(penalty, 0, 50)
+    return penalty
+
+
+
+def track_lin_vel_x_amber(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    window_size: int = 10,        # low-pass filter window
+) -> torch.Tensor:
+    """Reward tracking of linear velocity commands (xy axes) using exponential kernel,
+       with a simple moving-average low-pass filter on the measured velocity."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    device = env.device
+    N = env.num_envs
+
+    # 1) pull the raw measured velocity for the base link in world frame
+    raw_act = asset.data.body_link_lin_vel_w[:, 3, :2]  # [N,2]
+
+    # 2) setup persistent ring buffer for low-pass
+    if not hasattr(track_lin_vel_x_amber, "_vel_buf"):
+        # buffer shape: [window, N, 2]
+        track_lin_vel_x_amber._vel_buf = torch.zeros(window_size, N, 2, device=device)
+        track_lin_vel_x_amber._buf_ptr = 0
+
+    buf = track_lin_vel_x_amber._vel_buf
+    ptr = track_lin_vel_x_amber._buf_ptr
+
+    # insert the newest measurement
+    buf[ptr] = raw_act
+    ptr = (ptr + 1) % window_size
+    track_lin_vel_x_amber._buf_ptr = ptr
+
+    # compute the filtered velocity as the window-average
+    filt_act = buf.mean(dim=0)  # [N,2]
+    
+    # 3) now compute the command vs. filtered actual error
+    cmd = env.command_manager.get_command(command_name)[:, :2]  # [N,2]
+    lin_vel_error = torch.sum((cmd - filt_act)**2, dim=1)       # [N]
+    # print("---------",filt_act,"/",cmd)
+    # 4) exponential kernel
+    std = max(std, 1e-4)
+    final = -lin_vel_error / (std**2)
+    final = torch.clamp(final, -50, 50)
+    final = torch.exp(final)
+
+    return final
+
+
+## Critic
+
+def base_lin_vel_amber(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Root linear velocity in the asset's root frame."""
+    # extract the used quantities (to enable type-hinting)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    return asset.data.body_link_lin_vel_w[:,3,:]

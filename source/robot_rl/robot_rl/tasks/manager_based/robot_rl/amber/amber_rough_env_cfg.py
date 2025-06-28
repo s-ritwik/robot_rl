@@ -66,16 +66,16 @@ class AmberRoughEnvCfg(AmberEnvCfg):
 
 
         # add your custom XY-vel observation
-        self.observations.policy.body_link_vel_xy = ObsTerm(
-            func=body_link_vel_xy,
-            params={
-                "command_name": "base_velocity",       # whatever your command alias is
-                "asset_cfg": SceneEntityCfg(name="robot")
-            },
-            # you may need to set history_length, scale, etc.
-            history_length=1,
-            scale=1.0,
-        )
+        # self.observations.policy.body_link_vel_xy = ObsTerm(
+        #     func=body_link_vel_xy,
+        #     params={
+        #         "command_name": "base_velocity",       # whatever your command alias is
+        #         "asset_cfg": SceneEntityCfg(name="robot")
+        #     },
+        #     # you may need to set history_length, scale, etc.
+        #     history_length=1,
+        #     scale=1.0,
+        # )
         ##
         # Scene
         ##
@@ -137,8 +137,8 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # Rewards
         ##
         
-        self.rewards.track_lin_vel_xy_exp.weight = 1.2
-        self.rewards.track_ang_vel_z_exp.weight = 0.5
+        # self.rewards.track_lin_vel_xy_exp.weight = 1.2
+        # self.rewards.track_ang_vel_z_exp.weight = 0.5
         self.rewards.lin_vel_z_l2.weight =  -2.0 # TODO reduce this maybe?
         self.rewards.ang_vel_xy_l2.weight = -0.05
         self.rewards.dof_torques_l2.weight = -1.0e-5
@@ -163,8 +163,8 @@ class AmberRoughEnvCfg(AmberEnvCfg):
 
         # self.rewards.height_torso.params["target_height"] = 0.75
         # self.rewards.feet_clearance.params["target_height"] = 0.12
-        self.rewards.joint_angles.weight        = 8   # e.g. half strength
-        self.rewards.joint_angles.params["std"] = 0.3   # narrower kernel
+        # self.rewards.joint_angles.weight        = 8   # e.g. half strength
+        # self.rewards.joint_angles.params["std"] = 0.3   # narrower kernel
 
         #phase following
         # self.rewards.foot_phase_contact.weight            = 0.10
@@ -173,7 +173,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # self.rewards.foot_clearance.weight                 = 0.5
         # self.rewards.foot_clearance.params["target_height"] = 0.08
         #torso rotation reward
-        self.rewards.torso_rotation.weight = -1.5
+        # self.rewards.torso_ = -1.5
 
         #symmetric foot clearances
         # self.rewards.symmetric_foot_airtime.weight            = 0.5

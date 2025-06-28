@@ -50,7 +50,7 @@ from rl_policy_wrapper import RLPolicy
 ##
 # Pre-defined configs
 ##
-from robot_rl.assets.robots.g1_21j import G1_MINIMAL_CFG  # isort: skip
+from robot_rl.robot_rl.assets.robots.amber5.py import AMBER_CFG  # isort: skip
 
 
 def design_scene() -> tuple[dict, list[list[float]]]:
@@ -69,7 +69,7 @@ def design_scene() -> tuple[dict, list[list[float]]]:
     prim_utils.create_prim("/World/Origin1", "Xform", translation=origins[0])
 
     # Articulation
-    robot_cfg = G1_MINIMAL_CFG.copy()
+    robot_cfg = AMBER_CFG.copy()
     robot_cfg.prim_path = "/World/Origin.*/Robot"
     robot = Articulation(cfg=robot_cfg)
 
