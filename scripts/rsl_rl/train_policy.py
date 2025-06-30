@@ -90,6 +90,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument("--max_iterations", type=int, default=None, help="Training iterations.")
     parser.add_argument("--distributed", action="store_true", help="Enable multi‑GPU training.")
+    parser.add_argument("--grid_sweep", action="store_true", help="Enable grid sweep mode.")
 
     # Isaac‑Lab / RSL‑RL pass‑throughs
     cli_args.add_rsl_rl_args(parser)
@@ -161,41 +162,46 @@ def main():
             agent_cfg_dict["max_iterations"] = args_cli.max_iterations
 
         # 2. PARAM_OVERRIDE parsing -----------------------------------------
-        param_override = os.environ.get("PARAM_OVERRIDE")
-        if param_override:
-            try:
-                full_path, raw_val = param_override.split("=", 1)
-
-                # heuristic type cast ------------------------------------------------
+        param_overrides = [v for k, v in os.environ.items() if k.startswith("PARAM_OVERRIDE")]
+        if param_overrides:
+            run_name_parts = []
+            for override in param_overrides:
                 try:
-                    val = float(raw_val) if "." in raw_val else int(raw_val)
-                except ValueError:
-                    val = raw_val
+                    full_path, raw_val = override.split("=", 1)
 
-                # decide root (env vs agent) ----------------------------------------
-                if full_path.startswith("env."):
-                    cfg_root, cfg_dict = env_cfg, env_cfg_dict
-                    key_path = full_path[4:].split(".")
-                elif full_path.startswith("agent."):
-                    cfg_root, cfg_dict = agent_cfg, agent_cfg_dict
-                    key_path = full_path[6:].split(".")
-                else:
-                    cfg_root, cfg_dict = agent_cfg, agent_cfg_dict
-                    key_path = full_path.split(".")
+                    # heuristic type cast ------------------------------------------------
+                    try:
+                        val = float(raw_val) if "." in raw_val else int(raw_val)
+                    except ValueError:
+                        val = raw_val
 
-                # apply to both structured cfg & dict view -------------------------
-                apply_override(cfg_root, key_path, val)
-                set_nested_dict(cfg_dict, key_path, val)
+                    # decide root (env vs agent) ----------------------------------------
+                    if full_path.startswith("env."):
+                        cfg_root, cfg_dict = env_cfg, env_cfg_dict
+                        key_path = full_path[4:].split(".")
+                    elif full_path.startswith("agent."):
+                        cfg_root, cfg_dict = agent_cfg, agent_cfg_dict
+                        key_path = full_path[6:].split(".")
+                    else:
+                        cfg_root, cfg_dict = agent_cfg, agent_cfg_dict
+                        key_path = full_path.split(".")
 
-                # tag run name -------------------------------------------------------
-                suffix = "_".join(full_path.split("."))
-                agent_cfg_dict["run_name"] = f"{suffix}_{str(val).replace('.', 'p')}"
-                print(
-                    f"[INFO] Overrode {'env' if cfg_root is env_cfg else 'agent'} "
-                    f"param {'.'.join(key_path)} = {val}"
-                )
-            except Exception as exc:
-                print(f"[WARNING] Failed to parse PARAM_OVERRIDE='{param_override}': {exc}")
+                    # apply to both structured cfg & dict view -------------------------
+                    apply_override(cfg_root, key_path, val)
+                    set_nested_dict(cfg_dict, key_path, val)
+
+                    # tag run name -------------------------------------------------------
+                    suffix = "_".join(full_path.split("."))
+                    run_name_parts.append(f"{suffix}_{str(val).replace('.', 'p')}")
+                    print(
+                        f"[INFO] Overrode {'env' if cfg_root is env_cfg else 'agent'} "
+                        f"param {'.'.join(key_path)} = {val}"
+                    )
+                except Exception as exc:
+                    print(f"[WARNING] Failed to parse PARAM_OVERRIDE='{override}': {exc}")
+
+            if run_name_parts:
+                agent_cfg_dict["run_name"] = "_".join(run_name_parts)
 
         # 3. Seed/device handling -------------------------------------------
         env_cfg.seed = agent_cfg_dict["seed"]
