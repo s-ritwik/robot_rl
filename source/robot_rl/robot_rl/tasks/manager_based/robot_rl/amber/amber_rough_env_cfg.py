@@ -19,7 +19,6 @@ from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
 from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg as ObsTerm
 
 import robot_rl.tasks.manager_based.robot_rl.amber.mdp as mdp
-from robot_rl.tasks.manager_based.robot_rl.amber.mdp.amber_obs import body_link_vel_xy
 
 # from robot_rl.tasks.manager_based.robot_rl.humanoid_env_cfg import HumanoidEnvCfg
 
@@ -158,27 +157,28 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # self.rewards.feet_clearance.weight = -20.0
         # self.rewards.phase_contact.weight = 0.25
 
-        # self.rewards.joint_deviation_arms.weight = -0.5             # Arms regularization
-        # self.rewards.joint_deviation_torso.weight = -1.0
-
-        # self.rewards.height_torso.params["target_height"] = 0.75
-        # self.rewards.feet_clearance.params["target_height"] = 0.12
-        # self.rewards.joint_angles.weight        = 8   # e.g. half strength
-        # self.rewards.joint_angles.params["std"] = 0.3   # narrower kernel
-
-        #phase following
-        # self.rewards.foot_phase_contact.weight            = 0.10
-        # self.rewards.foot_phase_contact.params["period"] = 0.8
-        #foot clearance
-        # self.rewards.foot_clearance.weight                 = 0.5
-        # self.rewards.foot_clearance.params["target_height"] = 0.08
-        #torso rotation reward
-        # self.rewards.torso_ = -1.5
-
-        #symmetric foot clearances
-        # self.rewards.symmetric_foot_airtime.weight            = 0.5
-        # self.rewards.symmetric_foot_airtime.params["threshold"] = 2
-
+       # big penalty on fall (pelvis contact)
+        self.rewards.termination_penalty.weight           = -400.0  
+        # reward forward x‐velocity tracking
+        self.rewards.track_lin_vel_xy.weight              =  120.0  
+        # Reward phase based contacts: stance and wing
+        self.rewards.phase_contact.weight                 =  10 
+        # punish large arm joint deviations
+        self.rewards.joint_angles.weight                  =   -4.0  
+        # reward maintaining torso upright within window, penalize beyond threshold
+        self.rewards.torso_orientation.weight             =    2.0  
+        # reward alternating foot contacts vs repeats
+        self.rewards.alternation_contact.weight           =   20.0  
+        # reward progressive foot placement per cycle
+        self.rewards.progressive_step.weight              =    6.0  
+        # per‐cycle foot‐contact correctness (+5 for exactly one each, else penalty)
+        self.rewards.foot_cycle_sym.weight                =   0 #5 
+        # penalize asymmetric foot airtime
+        self.rewards.symmetric_foot_airtime.weight        =  0 # -1.0
+        self.rewards.symmetric_foot_airtime.params["diff_threshold"] = 5
+        self.rewards.symmetric_foot_airtime.params["reward_good"] = 8
+        # penalize foot sliding (squared speed during contact)
+        self.rewards.feet_no_slip_condition.weight        =  -10.0  
         # forward feet placement:
         # self.rewards.foot_forward_placement = 0.8
         # forward and progressive foot placement:

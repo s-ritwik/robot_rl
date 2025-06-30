@@ -10,18 +10,16 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab.managers import RewardTermCfg as RewTerm
 
-from .g1_rough_env_lip_cfg import G1RoughLipEnvCfg
-
+from .amber_rough_env_lip_cfg import AmberRoughLipEnvCfg
 ##
 # Pre-defined configs
 ##
-from isaaclab_assets import G1_MINIMAL_CFG  # isort: skip
 
 ##
 # Environment configuration
 ##
 @configclass
-class G1FlatLipEnvCfg(G1RoughLipEnvCfg):
+class AmberFlatLipEnvCfg(AmberRoughLipEnvCfg):
     """Configuration for the G1 Flat environment."""
     def __post_init__(self):
         # post init of parent

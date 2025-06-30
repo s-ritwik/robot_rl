@@ -49,8 +49,8 @@ class AmberActionsCfg:
     )
 
 # TODO: Try playing with the period for the lip model
-PERIOD = 0.8 #0.6 #0.8  # (0.4 s swing phase)
-
+PERIOD = 1.2 #0.6 #0.8  # (0.4 s swing phase)
+WDES=0.0
 
 @configclass
 class AmberObservationsCfg(ObservationsCfg):
@@ -114,21 +114,21 @@ class AmberRewardCfg(RewardsCfg):
     """Keep the default velocity‐tracking rewards, but turn off unwanted terms."""
 
     # big penalty on fall (pelvis contact)
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-400.0)
 
     # track forward velocity (x) – using the base class's XY function is fine since y is always zero
     track_lin_vel_xy = RewTerm(
         func=mdp.track_lin_vel_x_amber,
-        weight=50,
+        weight=120,
         params={"command_name": "base_velocity",
                         "std": 0.4,      },      # required parameter},
     )
     # punishes joint angles
     joint_angles = RewTerm(
         func=mdp.track_joint_angles_exp,
-        weight=-2.0,           # <— tune this scalar to control strength
+        weight=-4.0,           # <— tune this scalar to control strength
         params={"std": 0.5,
-                "threshold_deg":10,
+                "threshold_deg":2,
                 },  # <— how “wide” your kernel is
     )
     # torso angle
@@ -142,20 +142,23 @@ class AmberRewardCfg(RewardsCfg):
             "penalty_cap":           20.0,
         },
     )
-    #rewards symmetric footsteps
-    foot_phase_contact = RewTerm(
-        func=mdp.foot_phase_contact,
-        weight=10,   # tune so “2 in‐phase” ≈ your other reward scales
-        params={
-            "period": PERIOD,
-            "left_sensor_name": "contact_forces_left",
-            "right_sensor_name": "contact_forces_right",
+    #rewards stance swing phase
+    phase_contact = RewTerm(
+        func   = mdp.foot_phase_contact_amber,
+        weight = 10.0,   # positive weight rewards in‐phase contacts
+        params = {
+            "period":             0.8,
+            "command_name":       "base_velocity",
+            "left_sensor_name":   "contact_forces_left",
+            "right_sensor_name":  "contact_forces_right",
+            "force_thresh":       1.0,
+            "cmd_thresh":         0.005,
         },
     )
     # rewards consecutive foot placements
     alternation_contact = RewTerm(
         func   = mdp.alternation_contact_reward,
-        weight = 10.0,    # positive to reward alternation, negative for repeats
+        weight = 20.0,    # positive to reward alternation, negative for repeats
         params = {
             "left_sensor_name":  "contact_forces_left",
             "right_sensor_name": "contact_forces_right",
@@ -174,17 +177,18 @@ class AmberRewardCfg(RewardsCfg):
             "max_step":       0.2,
         },
     )
-
-    # #penalises consecutive foot touches in a cycle
-    # alternate_feet = RewTerm(
-    #     func   = mdp.alternate_feet_cycle,
-    #     weight = -1.5,             # negative → converts penalty to cost
-    #     params = {
-    #         "period":            PERIOD,
-    #         "left_sensor_name":  "contact_forces_left",
-    #         "right_sensor_name": "contact_forces_right",
-    #     },
-    # )
+    # punishes more than 1 reward per cycle:
+    foot_cycle_sym = RewTerm(
+        func   = mdp.foot_contact_cycle_reward,
+        weight = 10.0,    # positive: reward per-cycle correctness, penalty built into func
+        params = {
+            "period":           PERIOD,
+            "left_sensor_name": "contact_forces_left",
+            "right_sensor_name":"contact_forces_right",
+            "contact_thresh":    1,
+            "expo_rate":         0.5,   # tune how steeply penalties grow
+        },
+    )
     # foot_clearance = RewTerm(
     #     func=mdp.foot_clearance_amber,
     #     weight=1.0,   # tune so its scale matches your other rewards
@@ -194,15 +198,18 @@ class AmberRewardCfg(RewardsCfg):
     #         "right_sensor_name": "contact_forces_right",
     #     },
     # )
-    # symmetric_foot_airtime = RewTerm(
-    #     func=mdp.symmetric_phase_contact_amber,
-    #     weight=15,   # tune to balance with other rewards
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "threshold":    2,
-    #         "period":      PERIOD,
-    #     },
-    # )
+    symmetric_foot_airtime = RewTerm(
+        func   = mdp.foot_air_time_symmetry,
+        weight = -1.0,   # negative → penalize asymmetry
+        params = {
+            "period":            0.8,
+            "left_sensor_name":  "contact_forces_left",
+            "right_sensor_name": "contact_forces_right",
+            "contact_thresh":     1,
+            "diff_threshold":     3,
+            "reward_good":     2,
+        },
+    )
     feet_no_slip_condition = RewTerm(
         func   = mdp.contact_no_vel_amber,
         weight = -15,                 # negative → subtracts squared-speed cost
@@ -232,11 +239,12 @@ class AmberRewardCfg(RewardsCfg):
     # small alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=0.1)
 
+from isaaclab.managers import EventTermCfg as EventTerm
 
 @configclass
 class AmberEventsCfg(EventCfg):
     """You can insert random pushes or mass‐perturbation here if desired."""
-    pass
+    
 
 
 @configclass
@@ -252,109 +260,3 @@ class AmberEnvCfg(LocomotionVelocityRoughEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-    
-        # # — swap in our Amber robot articulation —
-        # self.scene.robot = AMBER_CFG.replace(prim_path="{ENV_REGEX_NS}/Amber")
-
-        # # — add a scene‐level contact sensor on the torso link —
-        # self.scene.contact_forces = ContactSensorCfg(
-        #     prim_path="{ENV_REGEX_NS}/Amber/amber3_PF/torso",
-        #     update_period=0.0,
-        #     history_length=1,
-        #     debug_vis=False,
-        # )
-
-        # # now let the base class wire up buffers, spaces, etc.
-
-        # # gv_cfg = self.commands.base_velocity.goal_vel_visualizer_cfg
-        # # gv_cfg.pose_in_robot_frame = True
-        # # gv_cfg.parent_prim_path   = "{ENV_REGEX_NS}/Amber/torso"
-        # # gv_cfg.pose_offset        = (0.0, 0.0, 0.20)
-
-        # # cv_cfg = self.commands.base_velocity.current_vel_visualizer_cfg
-        # # cv_cfg.pose_in_robot_frame = True
-        # # cv_cfg.parent_prim_path   = "{ENV_REGEX_NS}/Amber/torso"
-        # # cv_cfg.pose_offset        = (0.0, 0.0, 0.15)
-        # super().__post_init__()
-
-        # # # turn off heading (yaw) control entirely
-        # # self.commands.base_velocity.heading_command = False
-        # # # zero out any lateral (Y) command
-        # # self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
-        # # # zero out any yaw‐rate command
-        # # self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
-        # # =============================================
-        # # AVOID BOUNCING ON RESET
-        # # =============================================
-        # # 1) Always lift the root 1 cm above ground on reset
-        # base_reset = self.events.reset_base
-        # base_reset.params["pose_range"]["z"] = (0.01, 0.01)
-
-        # # 2) Always zero out any reset velocity
-        # for axis in base_reset.params["velocity_range"].keys():
-        #     base_reset.params["velocity_range"][axis] = (0.0, 0.0)
-
-        # # self.terminations.base_contact = None
-        # # — re‐enable collision termination on torso hits —
-        # self.terminations.base_contact = TerminationTermCfg(
-        #     func=mdp.torso_contact_termination,
-        #     params={
-        #         "sensor_cfg": SceneEntityCfg(name="contact_forces"),
-        #         "asset_cfg":  SceneEntityCfg(name="robot"),
-        #     },
-        # )
-
-        # # # — terminate on *any* contact force (non-zero) —
-        # # self.terminations.any_contact = TerminationTermCfg(
-        # #     func=mdp.any_contact_force_termination,
-        # #     params={
-        # #         "sensor_cfg": SceneEntityCfg(name="contact_forces"),
-        # #         "threshold": 0.0,       # trigger if contact_force > 0
-        # #     },
-        # # )
-
-        # # # — terminate if forward‐velocity obs explodes beyond 5000 m/s —
-        # # self.terminations.too_fast = TerminationTermCfg(
-        # #     func=mdp.excessive_velocity_termination,
-        # #     params={"command_name": "base_velocity",
-        # #                 "std": 0.5, "vthreshold": 5000.0, },
-        # # )
-        # # — reset if our tracked forward-speed reward goes NaN —
-        # self.terminations.nan_track_vel = TerminationTermCfg(
-        #     func=mdp.nan_velocity_termination,
-        #     params={
-        #         "asset_cfg":  SceneEntityCfg(name="robot"),  # same key used above
-        #         "command_name": "base_velocity",
-        #     },
-        # )
-        # # self.events.reset_robot_joints = None
-        # # # disable random “push” velocities
-        # # self.events.push_robot         = None
-        # # # disable any external‐force‐torque at reset
-        # # self.events.base_external_force_torque = None
-
-
-        # # keep your other terms disabled
-        # self.rewards.feet_air_time      = None
-        # self.rewards.undesired_contacts = None
-        # self.events.add_base_mass       = None
-
-        # # preserve whatever you did with external forces
-        # self.events.base_external_force_torque.params["asset_cfg"].body_names = ["torso"]
-
-    # def define_markers(self) -> VisualizationMarkers:
-    # """Define markers with various different shapes."""
-    # self.footprint_cfg = VisualizationMarkersCfg(
-    #     prim_path="/Visuals/footprint",
-    #     markers={
-    #         "des_foot": sim_utils.CuboidCfg(
-    #             size=(0.2, 0.065, 0.018),
-    #             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-    #         ),
-    #         # "stance_foot": sim_utils.CuboidCfg(
-    #         #     size=(0.2, 0.065, 0.018),
-    #         #     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
-    #         # ),
-    #     }
-    # )
-    #     self.footprint_visualizer = VisualizationMarkers(self.footprint_cfg)

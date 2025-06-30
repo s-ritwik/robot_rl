@@ -17,6 +17,8 @@ from isaaclab.utils.math import wrap_to_pi
 from isaaclab.sensors import ContactSensor
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import euler_xyz_from_quat, wrap_to_pi, quat_rotate_inverse, yaw_quat, quat_rotate, quat_inv
+from pxr import Gf, UsdGeom
+import omni.usd  
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -228,95 +230,7 @@ def track_heading(env: ManagerBasedRLEnv, command_name: str,
 
     return reward
 
-def compute_step_location_local(env: ManagerBasedRLEnv, env_ids: torch.Tensor,
-                          nom_height: float, Tswing: float, command_name: str, wdes: float,
-                          feet_bodies: SceneEntityCfg,
-                          sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
-                          asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-                          visualize: bool = True) -> torch.Tensor:
-    asset = env.scene[asset_cfg.name]
-    feet = env.scene[feet_bodies.name]
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    # Commanded velocity in the local frame
-    command = env.command_manager.get_command(command_name)
-
-    # COM Position in global frame
-    # r = asset.data.root_com_pos_w
-    r = asset.data.root_pos_w
-
-    # COM velocity in local frame
-    rdot = command
-    # rdot = asset.data.root_com_lin_vel_b
-
-    g = 9.81
-    omega = math.sqrt(g / nom_height)
-
-    # Instantaneous capture point as a 3-vector
-    icp_0 = torch.zeros((r.shape[0], 3), device=env.device)    # For setting the height
-    icp_0[:, :2] = rdot[:, :2]/omega
-
-
-    # Get the stance foot position
-    foot_pos = feet.data.body_pos_w[:, feet_bodies.body_ids]
-    # Contact schedule function
-    tp = (env.sim.current_time % (2*Tswing)) / (2*Tswing)     # Scaled between 0-1
-    phi_c = torch.tensor(math.sin(2*torch.pi*tp)/math.sqrt(math.sin(2*torch.pi*tp)**2 + Tswing), device=env.device)
-
-    # Stance foot in global frame
-    stance_foot_pos = foot_pos[:, int(0.5 - 0.5*torch.sign(phi_c)), :]
-    stance_foot_pos[:, 2] *= 0
-
-    def _transfer_to_global_frame(vec, root_quat):
-        return quat_rotate(yaw_quat(root_quat), vec)
-
-    def _transfer_to_local_frame(vec, root_quat):
-        return quat_rotate(yaw_quat(quat_inv(root_quat)), vec)
-
-    # Compute final ICP as a 3 vector
-    icp_f = (math.exp(omega * Tswing)*icp_0 + (1 - math.exp(omega * Tswing))
-             * _transfer_to_local_frame(r - stance_foot_pos, asset.data.root_quat_w))
-    icp_f[:, 2] *= 0
-
-
-    # Compute ICP offsets
-    sd = torch.abs(command[:, 0]) * Tswing #TODO: Note this only works if there are no commanded local y velocities
-    wd = wdes * torch.ones(r.shape[0], device=env.device)
-
-    bx = sd / (math.exp(omega * Tswing) - 1)
-    by = torch.sign(phi_c) * wd / (math.exp(omega * Tswing) + 1)
-    b = torch.stack((bx, by, torch.zeros(r.shape[0], device=env.device)), dim=1)
-
-    # Clip the step to be within the kinematic limits
-    p_local = icp_f.clone()
-    p_local[:, 0] = torch.clip(icp_f[:, 0] - b[:, 0], -0.5, 0.5)    # Clip in the local x direction
-    p_local[:, 1] = torch.clip(icp_f[:, 1] - b[:, 1], -0.3, 0.3)    # Clip in the local y direction
-
-
-    # Compute desired step in the global frame
-    p = _transfer_to_global_frame(p_local, asset.data.root_quat_w) + r
-
-    p[:, 2] *= 0
-
-    # print(f"icp_f = {icp_f},\n"
-    #       f"icp_0 = {icp_0},\n"
-    #       f"b = {b},\n")
-
-    if visualize:
-        sw_st_feet = torch.cat((p, foot_pos[:, int(0.5 - 0.5 * torch.sign(phi_c)), :]), dim=0)
-        env.footprint_visualizer.visualize(
-            # TODO: Visualize both the current stance foot and the desired foot
-            # translations=foot_pos[:, int(0.5 - 0.5*torch.sign(phi_c)), :], #p,
-            # translations=foot_pos[:, (env.cfg.control_count % 2), :],
-            translations=sw_st_feet,
-            orientations=yaw_quat(asset.data.root_quat_w).repeat_interleave(2, dim=0),
-            # repeat 0,1 for num_env
-            # marker_indices=torch.tensor([0,1], device=env.device).repeat(env.num_envs),
-        )
-
-    env.cfg.current_des_step[env_ids, :] = p[env_ids,:]  # This only works if I compute the new location once per step/on a timer
-
-    return p
 
 def compute_step_location(env: ManagerBasedRLEnv, env_ids: torch.Tensor,
                           nom_height: float, Tswing: float, command_name: str, wdes: float,
@@ -535,41 +449,159 @@ def track_joint_angles_exp(
     return penalty
 
 
-def foot_phase_contact(
+def foot_phase_contact_amber(
     env: ManagerBasedRLEnv,
     period: float = 0.8,
-    left_sensor_name: str = "contact_forces_left",
+    command_name: Optional[str] = "base_velocity",
+    left_sensor_name: str  = "contact_forces_left",
     right_sensor_name: str = "contact_forces_right",
+    force_thresh: float    = 1.0,
+    cmd_thresh: float      = 0.005,
 ) -> torch.Tensor:
-    """Reward a left/right shin contact if it matches the swing/stance phase."""
-    # fetch the two sensors from the scene.sensors dict
-    left_sensor  = env.scene.sensors[left_sensor_name]
-    right_sensor = env.scene.sensors[right_sensor_name]
+    """
+    Reward shin‐contact matching the expected swing/stance phase,
+    but if the commanded velocity norm is < cmd_thresh then all contact
+    counts as “stance” (i.e. in-phase).
+    """
+    N, dev = env.num_envs, env.device
 
-    # prepare a per-env score
-    res = torch.zeros(env.num_envs, device=env.device, dtype=torch.float)
-
-    # compute a single scalar phase [0,1) → stance foot index 0 or 1
-    tp = (env.sim.current_time % period) / period         # Python float
-    phi = math.sin(2 * math.pi * tp)                      # Python float
+    # 1) compute which foot *should* be stance this instant
+    tp       = (env.sim.current_time % period) / period
+    phi      = math.sin(2 * math.pi * tp)
     stance_i = 1 if phi > 0 else 0
 
-    # for each foot: check “in contact” vs “should be in stance”
-    for idx, sensor in enumerate((left_sensor, right_sensor)):
-        # net_forces_w_history: [N, hist_len, num_bodies, 3]
-        # -‐> take max over history & bodies and threshold
-        contact = (
-            sensor.data.net_forces_w_history
-                  .norm(dim=-1)             # [N, hist_len, num_bodies]
-                  .max(dim=1)[0]            # max over hist_len
-                  .max(dim=1)[0]            # max over num_bodies
-                  > 1.0                     # bool [N]
-        )
-        # in‐phase if contact== (idx==stance_i)
-        ok = ~(contact ^ (stance_i == idx))
-        res += ok.float()
+    # 2) if we have a command, build a mask of “idle” envs
+    if command_name is not None:
+        cmd     = env.command_manager.get_command(command_name)[:, :2]  # [N,2]
+        idle    = torch.norm(cmd, dim=1) < cmd_thresh                   # bool[N]
+    else:
+        idle = torch.zeros(N, device=dev, dtype=torch.bool)
 
+    # 3) fetch sensors
+    left_s   = env.scene.sensors[left_sensor_name]
+    right_s  = env.scene.sensors[right_sensor_name]
+    sensors  = [left_s, right_s]
+
+    # 4) build result
+    res = torch.zeros(N, device=dev)
+
+    for idx, sensor in enumerate(sensors):
+        # [N,hist,bodies,3] → max‐norm per env
+        contact = (
+            sensor.data
+                  .net_forces_w_history
+                  .norm(dim=-1)      # [N,hist,bodies]
+                  .max(dim=1)[0]     # [N,bodies]
+                  .max(dim=1)[0]     # [N]
+                  > force_thresh     # bool[N]
+        )
+
+        # if idle, treat every contact as stance (i.e. always in‐phase)
+        in_phase = torch.where(
+            idle,
+            torch.ones_like(contact, dtype=torch.bool),
+            contact ^ (idx != stance_i)   # True if contact==(idx==stance_i)
+        )
+
+        res += in_phase.float()
     return res
+
+
+
+def foot_contact_cycle_reward(
+    env: ManagerBasedRLEnv,
+    period: float                = 0.8,
+    left_sensor_name: str        = "contact_forces_left",
+    right_sensor_name: str       = "contact_forces_right",
+    contact_thresh: float        = 0.5,
+    expo_rate: float             = 2.0,    # growth rate for penalty
+) -> torch.Tensor:
+    """
+    Once per `period`, count rising-edge contacts per foot:
+      Ci = # of times force > contact_thresh transitioned 0→1.
+    Reward = +1 if C_left==1 and C_right==1,
+           = - [ (exp(expo_rate*(C_left-1)) -1)
+                 + (exp(expo_rate*(C_right-1)) -1) ]
+    Holds that same value for the entire next cycle.
+    """
+    N, dev = env.num_envs, env.device
+    t      = env.sim.current_time
+
+    # 1) current cycle idx
+    cycle_idx = int(math.floor(t / period))
+
+    # 2) detect rising-edge contact
+    def rising(name):
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        m  = fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0]
+        c  = m > contact_thresh
+        return c
+
+    c_l = rising(left_sensor_name)
+    c_r = rising(right_sensor_name)
+
+    # 3) persistent state
+    fn = foot_contact_cycle_reward
+    if not hasattr(fn, "_prev_cycle"):
+        fn._prev_cycle   = torch.full((N,), -1, device=dev, dtype=torch.long)
+        fn._prev_l       = torch.zeros((N,), device=dev, dtype=torch.bool)
+        fn._prev_r       = torch.zeros((N,), device=dev, dtype=torch.bool)
+        fn._count_l      = torch.zeros((N,), device=dev, dtype=torch.long)
+        fn._count_r      = torch.zeros((N,), device=dev, dtype=torch.long)
+        fn._last_reward  = torch.zeros((N,), device=dev)
+
+    prev_cycle  = fn._prev_cycle
+    prev_l      = fn._prev_l
+    prev_r      = fn._prev_r
+    count_l     = fn._count_l
+    count_r     = fn._count_r
+    last_reward = fn._last_reward
+
+    # rising edges: now contact & wasn't before
+    rise_l = c_l & ~prev_l
+    rise_r = c_r & ~prev_r
+
+    # update previous contact flags
+    prev_l.copy_(c_l)
+    prev_r.copy_(c_r)
+
+    # 4) detect new cycle
+    new_cycle = cycle_idx != prev_cycle
+
+    # 5) on finishing a cycle, compute reward & reset counters
+    finishing = new_cycle & (prev_cycle >= 0)
+    if finishing.any():
+        idx = finishing.nonzero(as_tuple=False).flatten()
+        Cl  = count_l[idx].to(torch.float)
+        Cr  = count_r[idx].to(torch.float)
+
+        # +1 if exactly one each
+        perfect = (Cl == 1.0) & (Cr == 1.0)
+        reward = torch.where(
+            perfect,
+            torch.ones_like(Cl, device=dev) * 5,
+            - (torch.expm1(expo_rate * (Cl - 1.0)) +
+               torch.expm1(expo_rate * (Cr - 1.0)))
+        )
+        last_reward[idx] = reward
+
+        # reset counts to include any rising now
+        count_l[idx] = rise_l[idx].long()
+        count_r[idx] = rise_r[idx].long()
+
+    # 6) otherwise accumulate rising-edge counts
+    cont = ~new_cycle
+    if cont.any():
+        idxs = cont.nonzero(as_tuple=False).flatten()
+        count_l[idxs] += rise_l[idxs].long()
+        count_r[idxs] += rise_r[idxs].long()
+
+    # 7) update cycle index
+    prev_cycle[new_cycle] = cycle_idx
+    # print(last_reward)
+    # 8) return the held reward
+    return last_reward
+
 
 
 def foot_clearance_amber(
@@ -618,56 +650,79 @@ def foot_clearance_amber(
     return out
 
 
-def symmetric_phase_contact_amber(
+def foot_air_time_symmetry(
     env: ManagerBasedRLEnv,
-    command_name: str,
-    threshold: float,
     period: float = 0.8,
+    left_sensor_name: str  = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+    contact_thresh: float   = 0.5,
+    diff_threshold: float   = 5.0,   # count‐difference threshold for reward
+    reward_good: float       = 2.0,  # reward when |AL−AR| < diff_threshold
 ) -> torch.Tensor:
     """
-    Reward exactly one shin in contact per gait‐phase, enforcing alternation.
-    Uses only the {contact_forces_left, contact_forces_right} sensors
-    and the sim clock (mod period).
-    Returns a [num_envs] tensor ∈ {0,1,2}.
+    Once per `period`, compute |AL − AR| where
+      Ai = count of timesteps force_i < contact_thresh during the last cycle.
+    If |AL−AR| < diff_threshold, emit +reward_good, else emit –|AL−AR|.
+    Holds that same value for the entire next cycle.
     """
-    # 1) grab the two sensors by name
-    left_s  = env.scene.sensors["contact_forces_left"]
-    right_s = env.scene.sensors["contact_forces_right"]
+    N, dev = env.num_envs, env.device
+    t      = env.sim.current_time
 
-    # 2) phase → stance index {0:left, 1:right}
-    tp       = (env.sim.current_time % period) / period
-    stance_i = 1 if math.sin(2*math.pi*tp) > 0 else 0
+    # 1) which cycle are we in?
+    cycle_idx = int(math.floor(t / period))
 
-    # 3) instant‐contact boolean for each foot
-    def in_contact(sensor):
-        fh = sensor.data.net_forces_w_history  # [N, hist, bodies, 3]
-        # → norm→max over history & bodies → bool[N]
-        return (
-            fh.norm(dim=-1)
-              .max(dim=1)[0]
-              .max(dim=1)[0]
-              > 1.0
+    # 2) airborne boolean per foot
+    def in_air(name):
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        m  = fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0]
+        return m < contact_thresh
+
+    a_l = in_air(left_sensor_name)
+    a_r = in_air(right_sensor_name)
+
+    # 3) persistent state init
+    fn = foot_air_time_symmetry
+    if not hasattr(fn, "_prev_cycle"):
+        fn._prev_cycle   = torch.full((N,), -1, device=dev, dtype=torch.long)
+        fn._air_l        = torch.zeros((N,), device=dev, dtype=torch.long)
+        fn._air_r        = torch.zeros((N,), device=dev, dtype=torch.long)
+        fn._last_reward  = torch.zeros((N,), device=dev)
+
+    prev_cycle  = fn._prev_cycle
+    air_l       = fn._air_l
+    air_r       = fn._air_r
+    last_reward = fn._last_reward
+
+    # 4) detect new cycle
+    new_cycle = (cycle_idx != prev_cycle)
+
+    # 5) on finishing a cycle, compute reward & reset counters
+    finishing = new_cycle & (prev_cycle >= 0)
+    if finishing.any():
+        idx  = finishing.nonzero(as_tuple=False).flatten()
+        diff = (air_l[idx] - air_r[idx]).abs().to(torch.float)
+        # +reward_good if diff under threshold, else –diff
+        last_reward[idx] = torch.where(
+            diff < diff_threshold,
+            torch.full_like(diff, reward_good),
+            -diff
         )
+        # reset counters for the new cycle, include current step if airborne
+        air_l[idx] = a_l[idx].long()
+        air_r[idx] = a_r[idx].long()
 
-    contact_l = in_contact(left_s)
-    contact_r = in_contact(right_s)
+    # 6) accumulate during the cycle
+    cont = ~new_cycle
+    if cont.any():
+        idx = cont.nonzero(as_tuple=False).flatten()
+        air_l[idx] += a_l[idx].long()
+        air_r[idx] += a_r[idx].long()
 
-    # 4) sum up “correct” contacts
-    res = torch.zeros(env.num_envs, device=env.device)
-    for idx, contact in enumerate((contact_l, contact_r)):
-        # if idx==stance_i we *want* contact=True, else contact=False
-        ok = ~(contact ^ (idx == stance_i))
-        res += ok.float()
+    # 7) update cycle index
+    prev_cycle[new_cycle] = cycle_idx
 
-    # 5) clamp by threshold & mask out zero‐speed cases
-    res = torch.clamp(res, max=threshold)
-    cmd = env.command_manager.get_command(command_name)[:, :2]
-    speed_mask = (torch.norm(cmd, dim=1) > 0.1).float()
-    out = res * speed_mask
-
-    # _check_nan("symmetric_phase_contact_amber", out)
-    return out
-
+    # 8) return the held reward for this cycle
+    return last_reward
 
 def torso_rotation_term(
     env: ManagerBasedRLEnv,
@@ -1168,3 +1223,250 @@ def base_lin_vel_amber(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scene
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     return asset.data.body_link_lin_vel_w[:,3,:]
+
+
+## LIP
+
+
+from pxr import UsdGeom, Gf, Sdf
+
+# def compute_step_location_local_amber(
+#     env: ManagerBasedRLEnv,
+#     env_ids: torch.Tensor,
+#     nom_height: float,
+#     Tswing: float,
+#     command_name: str,
+#     wdes: float,
+#     feet_bodies: SceneEntityCfg,                           # API compatibility
+#     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+#     asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot"),
+#     visualize: bool = True
+# ) -> torch.Tensor:
+#     """
+#     Amber‐specific ICP step planner:
+#       • COM ≈ body_pos_w[:,3]
+#       • toes ≈ last two body indices
+#       • computes both next‐left and next‐right targets
+#       • visualizes red=right, green=left spheres
+#       • writes env.current_des_step
+#     """
+#     N, dev = env.num_envs, env.device
+#     asset  = env.scene[asset_cfg.name]
+
+#     # 1) commanded velocity in local frame
+#     command = env.command_manager.get_command(command_name)  # [N,?]
+
+#     # 2) COM position in global (use body_pos_w index 3)
+#     r = asset.data.body_pos_w[:, 3, :]                      # [N,3]
+
+#     # 3) initial ICP offset
+#     g     = 9.81
+#     omega = math.sqrt(g / nom_height)
+#     icp_0 = torch.zeros((N, 3), device=dev)
+#     icp_0[:, :2] = command[:, :2] / omega
+
+#     # 4) toe positions: second-last = right, last = left
+#     pos      = asset.data.body_pos_w                       # [N, B, 3]
+#     B        = pos.size(1)
+#     foot_pos = pos[:, [B-2, B-1], :]                       # [N,2,3]
+
+#     # 5) scalar phase
+#     tp_scalar    = (env.sim.current_time % (2*Tswing)) / (2*Tswing)
+#     phi_c_scalar = math.sin(2*math.pi*tp_scalar) / math.sqrt(math.sin(2*math.pi*tp_scalar)**2 + Tswing)
+#     # broadcast to all envs
+#     phi_c        = torch.full((N,), phi_c_scalar, device=dev)
+#     phi_sign     = torch.sign(phi_c)                       # tensor [N] of ±1
+
+#     # 6) helper to compute one target given stance index
+#     def _compute_target(stance_idx: int) -> torch.Tensor:
+#         # stance foot global pos
+#         st = foot_pos[:, stance_idx, :].clone()
+#         st[:, 2] = 0.0
+
+#         # transform COM difference into local frame
+#         local_diff = quat_rotate(
+#             yaw_quat(quat_inv(asset.data.root_quat_w)),
+#             (r - st)
+#         )
+#         exp_wT = math.exp(omega * Tswing)
+#         icp_f  = exp_wT * icp_0 + (1 - exp_wT) * local_diff
+#         icp_f[:, 2] = 0.0
+
+#         # desired offset b
+#         sd = torch.abs(command[:, 0]) * Tswing
+#         bx = sd / (exp_wT - 1.0)
+#         by = phi_sign * wdes / (exp_wT + 1.0)
+#         b  = torch.stack((bx, by, torch.zeros(N, device=dev)), dim=1)
+
+#         # clip in local
+#         p_loc = icp_f.clone()
+#         p_loc[:, 0] = torch.clamp(p_loc[:, 0] - b[:, 0], -0.5, 0.5)
+#         p_loc[:, 1] = torch.clamp(p_loc[:, 1] - b[:, 1], -0.3, 0.3)
+
+#         # back to global
+#         glob = quat_rotate(yaw_quat(asset.data.root_quat_w), p_loc) + r
+#         glob[:, 2] = 0.0
+#         return glob
+
+#     # 7) compute both swing targets
+#     p_left  = _compute_target(0)   # right stance → left swing
+#     p_right = _compute_target(1)   # left stance  → right swing
+
+#     # 8) visualize both
+#     if visualize:
+#         stage = omni.usd.get_context().get_stage()
+#         # grab the *true* COM for Amber
+#         com = asset.data.root_com_pos_w      # [N,3]
+#         for i in range(N):
+#             # -- next-right in red --
+#             prim = Sdf.Path(f"/World/debug/next_right_{i}")
+#             if not stage.GetPrimAtPath(prim):
+#                 sph = UsdGeom.Sphere.Define(stage, prim)
+#                 sph.GetRadiusAttr().Set(0.05)
+#             else:
+#                 sph = UsdGeom.Sphere(stage.GetPrimAtPath(prim))
+#             UsdGeom.XformCommonAPI(sph).SetTranslate(
+#                 Gf.Vec3d(*p_right[i].tolist())
+#             )
+#             sph.CreateDisplayColorAttr().Set([Gf.Vec3f(1,0,0)])
+
+#             # -- next-left in green --
+#             prim = Sdf.Path(f"/World/debug/next_left_{i}")
+#             if not stage.GetPrimAtPath(prim):
+#                 sph = UsdGeom.Sphere.Define(stage, prim)
+#                 sph.GetRadiusAttr().Set(0.05)
+#             else:
+#                 sph = UsdGeom.Sphere(stage.GetPrimAtPath(prim))
+#             UsdGeom.XformCommonAPI(sph).SetTranslate(
+#                 Gf.Vec3d(*p_left[i].tolist())
+#             )
+#             sph.CreateDisplayColorAttr().Set([Gf.Vec3f(0,1,0)])
+
+#             # -- COM in blue --
+#             prim = Sdf.Path(f"/World/debug/com_{i}")
+#             if not stage.GetPrimAtPath(prim):
+#                 sph = UsdGeom.Sphere.Define(stage, prim)
+#                 sph.GetRadiusAttr().Set(0.03)
+#             else:
+#                 sph = UsdGeom.Sphere(stage.GetPrimAtPath(prim))
+#             UsdGeom.XformCommonAPI(sph).SetTranslate(
+#                 Gf.Vec3d(*com[i].tolist())
+#             )
+#             sph.CreateDisplayColorAttr().Set([Gf.Vec3f(0,0,1)])
+#     # 9) store and return the “primary” step (here, right foot for example)
+#     if not hasattr(env, "current_des_step"):
+#         env.current_des_step = torch.zeros((N, 3), device=dev)
+#     env.current_des_step[env_ids, :] = p_right[env_ids, :]
+#     return p_right
+
+
+def compute_step_location_local_amber(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    nom_height: float,
+    Tswing: float,
+    command_name: str,
+    wdes: float,
+    feet_bodies: SceneEntityCfg,                           # still here for API compatibility
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg  = SceneEntityCfg("robot"),
+    visualize: bool = True
+) -> torch.Tensor:
+    asset = env.scene[asset_cfg.name]
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+
+    # 1) commanded velocity in local frame
+    command = env.command_manager.get_command(command_name)
+
+    # 2) COM position in global from body_pos_w index 3
+    r = asset.data.body_pos_w[:, 3, :]                      # [N,3]
+
+    # 3) COM “velocity” placeholder
+    rdot = command                                         # [N,2] ⟶ [N,3] when needed
+
+    # 4) capture-point base
+    g     = 9.81
+    omega = math.sqrt(g / nom_height)
+
+    icp_0 = torch.zeros((r.shape[0], 3), device=env.device)
+    icp_0[:, :2] = rdot[:, :2] / omega
+
+    # 5) foot positions from the last two body indices (B-2=right, B-1=left)
+    pos    = asset.data.body_pos_w                          # [N, bodies, 3]
+    B      = pos.shape[1]
+    foot_pos = pos[:, [B-2, B-1], :]                        # [N,2,3]
+
+    # 6) phase clock (unchanged)
+    tp    = (env.sim.current_time % (2*Tswing)) / (2*Tswing)
+    phi_c = torch.tensor(
+        math.sin(2*math.pi*tp) / math.sqrt(math.sin(2*math.pi*tp)**2 + Tswing),
+        device=env.device
+    )
+
+    # 7) stance foot in global
+    idx       = (0.5 - 0.5 * torch.sign(phi_c)).long().item()
+    stance_foot_pos = foot_pos[:, idx, :].clone()
+    stance_foot_pos[:, 2] = 0.0
+
+    # 8) coordinate transforms
+    def to_global(v, quat):
+        return quat_rotate(yaw_quat(quat), v)
+    def to_local (v, quat):
+        return quat_rotate(yaw_quat(quat_inv(quat)), v)
+
+    # 9) final ICP in local frame
+    exp_omT = math.exp(omega * Tswing)
+    icp_f = (
+        exp_omT * icp_0
+        + (1 - exp_omT) * to_local(r - stance_foot_pos, asset.data.root_quat_w)
+    )
+    icp_f[:, 2] = 0.0
+
+    # 10) offset b
+    sd = torch.abs(command[:, 0]) * Tswing
+    wd = wdes * torch.ones(r.shape[0], device=env.device)
+    bx = sd / (exp_omT - 1.0)
+    by = torch.sign(phi_c) * wd / (exp_omT + 1.0)
+    b  = torch.stack((bx, by, torch.zeros_like(bx)), dim=1)
+
+    # 11) clip in local
+    p_local = icp_f.clone()
+    p_local[:, 0] = torch.clamp(icp_f[:, 0] - b[:, 0], -0.5, 0.5)
+    p_local[:, 1] = torch.clamp(icp_f[:, 1] - b[:, 1], -0.3, 0.3)
+
+    # 12) back to global
+    p = to_global(p_local, asset.data.root_quat_w) + r
+    p[:, 2] = 0.0
+
+    # 13) optional visualization
+    # if visualize:
+    #     # visualize desired (p) and actual stance foot
+    #     vis_pts = torch.cat([p, foot_pos[:, idx, :]], dim=0)
+    #     env.footprint_visualizer.visualize(
+    #         translations=vis_pts,
+    #         orientations=yaw_quat(asset.data.root_quat_w).repeat_interleave(2, dim=0),
+    #     )
+    if visualize:
+        stage = omni.usd.get_context().get_stage()
+        for i in range(p.shape[0]):
+            prim_path = f"/World/debug/future_step_{i}"
+            if not stage.GetPrimAtPath(prim_path):
+                sph = UsdGeom.Sphere.Define(stage, prim_path)
+                sph.GetRadiusAttr().Set(0.02)
+            else:
+                sph = UsdGeom.Sphere(stage.GetPrimAtPath(prim_path))
+            # set its translation without re-adding the op each time
+            UsdGeom.XformCommonAPI(sph).SetTranslate(
+                Gf.Vec3d(p[i,0].item(), p[i,1].item(), p[i,2].item())
+            )
+    # 14) write out and return
+    # ensure we have a place to store it on the env
+    if not hasattr(env, "current_des_step"):
+        # allocate [num_envs × 3]
+        env.current_des_step = torch.zeros((env.num_envs, 3), device=env.device)
+
+    # now write into it
+    env.current_des_step[env_ids, :] = p[env_ids, :]
+    return p
+
+

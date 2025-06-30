@@ -31,7 +31,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.amber_flat_env_lip_cfg:AmberFlatLipEnvCfg",
-        "rsl_rl_cfg_entry_point": "<your_agents_module>.rsl_rl_ppo_cfg:PPORunnerCfg",
-        "skrl_cfg_entry_point": "<your_agents_module>:skrl_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
