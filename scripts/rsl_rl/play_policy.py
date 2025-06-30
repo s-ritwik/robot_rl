@@ -103,7 +103,6 @@ def get_args():
     p.add_argument("--play_log_dir", type=str)
     p.add_argument("--export_policy", action="store_true", default=False)
     p.add_argument("--plot_graphs", action="store_true", default=False, help="After playback, draw graphs from the logger .pkl files.")
-    p.add_argument("--save_summary", action="store_true", default=False, help="Calculate summary metrics (RMSE) and save to a CSV file.")
     cli_args.add_rsl_rl_args(p)
     AppLauncher.add_app_launcher_args(p)
     return p.parse_known_args()
@@ -216,61 +215,6 @@ def make_comparison_plots(play_dirs: list[str]) -> None:
         plt.savefig(outfile, dpi=150, bbox_inches="tight"); plt.close()
         print(f"[INFO] Plot saved → {outfile}")
 
-def calculate_and_save_summary_metrics(play_dirs: list[str]) -> None:
-    DT = 0.02
-    summary_data = []
-    print("\n--- Calculating Summary Metrics ---")
-    for play_dir in play_dirs:
-        run_name = os.path.basename(os.path.dirname(play_dir))
-        try:
-            with open(os.path.join(play_dir, "base_velocity.pkl"), "rb") as f: cmd_vel_raw = torch.tensor(pickle.load(f))
-            with open(os.path.join(play_dir, "root_pos.pkl"), "rb") as f: root_pos_raw = torch.tensor(pickle.load(f))
-            with open(os.path.join(play_dir, "root_velocity.pkl"), "rb") as f: root_vel_raw = torch.tensor(pickle.load(f))
-            with open(os.path.join(play_dir, "terminations.pkl"), "rb") as f: terminations_raw = torch.tensor(pickle.load(f), dtype=torch.bool)
-            
-            did_fall = torch.any(terminations_raw, dim=0)
-            fall_rate = torch.mean(did_fall.float()).item() * 100.0
-            
-            linear_cmd_vel = torch.stack([cmd_vel_raw[..., 0], cmd_vel_raw[..., 1], torch.zeros_like(cmd_vel_raw[..., 0])], dim=-1)
-            cmd_pos_integrated = torch.cumsum(linear_cmd_vel * DT, dim=0)
-            root_pos_relative = root_pos_raw - root_pos_raw[0, :, :]
-            vel_error_x_sq = (cmd_vel_raw[..., 0] - root_vel_raw[..., 0]) ** 2
-            vel_error_y_sq = (cmd_vel_raw[..., 1] - root_vel_raw[..., 1]) ** 2
-            vel_rmse_x = torch.sqrt(torch.mean(vel_error_x_sq)).item()
-            vel_rmse_y = torch.sqrt(torch.mean(vel_error_y_sq)).item()
-            pos_error_x_sq = (cmd_pos_integrated[..., 0] - root_pos_relative[..., 0]) ** 2
-            pos_error_y_sq = (cmd_pos_integrated[..., 1] - root_pos_relative[..., 1]) ** 2
-            pos_rmse_x = torch.sqrt(torch.mean(pos_error_x_sq)).item()
-            pos_rmse_y = torch.sqrt(torch.mean(pos_error_y_sq)).item()
-            
-            summary_data.append({
-                "run_name": run_name,
-                "fall_rate_percent": fall_rate,
-                "vel_rmse_x": vel_rmse_x, "vel_rmse_y": vel_rmse_y,
-                "pos_rmse_x": pos_rmse_x, "pos_rmse_y": pos_rmse_y,
-            })
-            print(f"  - {run_name}: Fall Rate: {fall_rate:.1f}%, Vel RMSE (X: {vel_rmse_x:.4f}, Y: {vel_rmse_y:.4f}), Pos RMSE (X: {pos_rmse_x:.4f}, Y: {pos_rmse_y:.4f})")
-        except FileNotFoundError as e:
-            if "terminations.pkl" in str(e):
-                print(f"[WARNING] 'terminations.pkl' not found for run '{run_name}'. Skipping fall rate calculation.")
-            else:
-                print(f"[WARNING] Could not load data for '{run_name}': {e}. Skipping this run.")
-            continue
-    if not summary_data:
-        print("[ERROR] No data found to calculate summary.")
-        return
-    output_filename = "comparison_summary.csv"
-    output_path = os.path.join(os.getcwd(), output_filename)
-    try:
-        with open(output_path, "w", newline="") as csvfile:
-            fieldnames = summary_data[0].keys()
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(summary_data)
-        print(f"\n[SUCCESS] Summary metrics saved to: {output_path}")
-    except (IOError, IndexError) as e:
-        print(f"[ERROR] Could not write to CSV file: {e}")
-
 # -----------------------------------------------------------------------------#
 #  Main                                                                        #
 # -----------------------------------------------------------------------------#
@@ -279,11 +223,10 @@ def main() -> None:
     args, hydra_tail = get_args()
     multi_run = len(args.policy_paths) > 1 if args.policy_paths else False
     common_flags = ["--env_type", args.env_type]
-    if args.plot_graphs or args.save_summary:
+    if args.plot_graphs:
         common_flags.append("--log_data")
     if not multi_run:
         if args.plot_graphs: common_flags.append("--plot_graphs")
-        if args.save_summary: common_flags.append("--save_summary")
 
     if multi_run:
         play_dirs = []
@@ -294,7 +237,6 @@ def main() -> None:
             cmd = [sys.executable, os.path.abspath(__file__), "--policy_paths", ckpt, "--play_log_dir", out_dir] + common_flags
             subprocess.run(cmd, check=True)
         if args.plot_graphs: make_comparison_plots(play_dirs)
-        if args.save_summary: calculate_and_save_summary_metrics(play_dirs)
         sys.exit(0)
 
     exp_name = args.exp_name or EXPERIMENT_NAMES[args.env_type]
@@ -414,8 +356,7 @@ def main() -> None:
         if args.plot_graphs:
             print("\n--- Generating Plots ---")
             make_comparison_plots([play_dir])
-        if args.save_summary:
-            calculate_and_save_summary_metrics([play_dir])
+
 
     app.close()
     print("\nAll playbacks done.")
