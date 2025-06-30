@@ -2,14 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
-"""Train-policy entry‑point rewritten to support PARAM_OVERRIDE on nested dicts.
-
-Key change: `apply_override()` now walks the target config path, handling both
-attributes and `dict`/OmegaConf nodes gracefully, so overrides like
-``env.rewards.clf_decreasing_condition.params.alpha`` work even when `params`
-is a plain dict.
-"""
-
 from __future__ import annotations
 
 import argparse
