@@ -74,7 +74,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, pol
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
-
+    just_reset = False
     amber = scene["Amber"]
     device = amber.data.default_root_state.device
     n_envs = args_cli.num_envs
@@ -91,7 +91,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, pol
     try:
         while simulation_app.is_running():
             simulation_app.update()
-
             # ─── Gather sensor data from env 0 ───
             # joint positions & velocities
             qpos = amber.data.joint_pos.cpu().numpy()[0]   # shape (7,)
@@ -107,16 +106,20 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, pol
 
             # ─── Build observation & get action ───
             obs = policy.create_obs(
-                qjoints=qpos,             # length-7 now
+                qjoints=qpos,
                 body_ang_vel=body_ang_vel,
-                qvel=qvel,                # length-7 now
+                qvel=qvel,
                 time=sim_time,
                 projected_gravity=get_projected_gravity(quat),
                 des_vel=des_vel,
             )
+            _ = policy.get_action(obs)        # returns a full Mujoco-style vector
+            # pull out the 4 Isaac‐ordered joint targets
+            action_isaac = policy.action_isaac         # now non-zero, raw 4-vector
+            # print(obs)
             action_isaac = policy.get_action_isaac()  # numpy (n_actions,)
-            print(f"[DEBUG] step={count:04d} sim_time={sim_time:.3f}")
-            print(f"        action_isaac (len={len(action_isaac)}): {action_isaac}")
+            # print(f"[DEBUG] step={count:04d} sim_time={sim_time:.3f}")
+            # print(f"        action_isaac (len={len(action_isaac)}): {action_isaac}")
 
             # ─── Convert to torch targets ───
             default_all = amber.data.default_joint_pos.clone()  # (1, n_joints)
@@ -131,7 +134,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, pol
             for i, name in enumerate(actuated_names):
                 idx = all_names.index(name)
                 joint_targets[:, idx] = target[0, i]
-
             # ─── Send to sim ───
             amber.set_joint_position_target(joint_targets)
 
@@ -149,6 +151,36 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, pol
             sim_time += sim_dt
             count += 1
 
+            # ─── contact-based reset of torso ───
+            # scene["contact_forces"] was added in your NewRobotsSceneCfg
+            forces = scene["contact_forces"].data.net_forces_w     # (n_envs, n_sensors, 3)
+            # sum absolute force per env
+            contact_sum = forces.abs().sum(dim=(1, 2))            # (n_envs,)
+            to_reset    = contact_sum > 0.0                       # boolean mask
+
+            if to_reset.any() and not just_reset:
+                # 1) restore default root pose & velocity
+                default_root = amber.data.default_root_state.clone()   # (n_envs,13)
+                default_root[:, :3] += scene.env_origins               # re-apply env offsets
+                amber.write_root_pose_to_sim(default_root[:, :7])
+                amber.write_root_velocity_to_sim(default_root[:, 7:])
+
+                # 2) restore default joint positions & velocities
+                default_jpos = amber.data.default_joint_pos.clone()    # (n_envs, n_joints)
+                default_jvel = amber.data.default_joint_vel.clone()    # (n_envs, n_joints)
+                amber.write_joint_state_to_sim(default_jpos, default_jvel)
+
+                # 3) flush one more step so contacts clear
+                scene.write_data_to_sim()
+                sim.step()
+                scene.update(sim_dt)
+
+                print(f"[INFO] Reset torso due to contact on envs {to_reset.nonzero().flatten().tolist()}")
+                # (optionally) zero out any accumulated counters here
+                just_reset = True
+                continue
+            if not to_reset.any():
+                just_reset = False
     except KeyboardInterrupt:
         print("\n[INFO] Ctrl-C – CSV saved at:", csv_path)
     finally:
@@ -183,7 +215,24 @@ def main():
         ang_vel_scale=cfg["ang_vel_scale"],
     )
     print(f"[INFO] Loaded policy from {cfg['checkpoint_path']}")
+    # 1) Show the actual JIT module
+    print("[DEBUG] JIT policy module:", policy.policy)
 
+    # 2) List its parameters / state_dict keys to confirm non-empty weights
+    try:
+        sd = policy.policy.state_dict()
+        print("[DEBUG] Policy state_dict keys (first 10):", list(sd.keys())[:10])
+    except Exception as e:
+        print("[DEBUG] Can't get state_dict:", e)
+
+    # 3) Run a dummy forward with zeros to see if it spits out anything non-zero
+    import torch
+    dummy_obs = torch.zeros(1, policy.num_obs)
+    if torch.cuda.is_available():
+        dummy_obs = dummy_obs.cuda()
+    with torch.inference_mode():
+        out = policy.policy(dummy_obs)
+    print("[DEBUG] policy(dummy_obs) →", out.detach().cpu().numpy().squeeze())
     # ─── Run! ───
     run_simulator(sim, scene, policy)
 

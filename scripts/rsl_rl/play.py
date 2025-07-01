@@ -166,8 +166,8 @@ def main():
             # env stepping
             obs, _, _, _ = env.step(actions)
             # print(obs) 
-            for name, sl in slice_map.items():
-                print(name, obs[:, sl])             # per-env values for that term
+            # for name, sl in slice_map.items():
+            #     print(name, obs[:, sl])             # per-env values for that term
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video

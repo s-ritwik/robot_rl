@@ -134,7 +134,7 @@ class RLPolicy:
         else:
             self.action_isaac = self.policy(obs).detach().numpy().squeeze()
 
-        return self.convert_to_mujoco(self.action_isaac) * self.action_scale + self.default_angles
+        return (self.action_isaac) * self.action_scale + self.default_angles[:self.num_actions]
 
     def get_num_actions(self) -> int:
         return self.num_actions
