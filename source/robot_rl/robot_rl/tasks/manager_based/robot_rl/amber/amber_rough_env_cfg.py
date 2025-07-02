@@ -160,25 +160,31 @@ class AmberRoughEnvCfg(AmberEnvCfg):
        # big penalty on fall (pelvis contact)
         self.rewards.termination_penalty.weight           = -400.0  
         # reward forward x‐velocity tracking
-        self.rewards.track_lin_vel_xy.weight              =  120.0  
+        self.rewards.track_lin_vel_xy.weight              =  80.0  
         # Reward phase based contacts: stance and wing
-        self.rewards.phase_contact.weight                 =  25 
+        self.rewards.phase_contact.weight                 =  0
+        # Reward phase based contacts: stance and wing
+        self.rewards.phase_contact_per_cycle.weight       =  0
         # punish large arm joint deviations
         self.rewards.joint_angles.weight                  =   -4.0  
         # reward maintaining torso upright within window, penalize beyond threshold
         self.rewards.torso_orientation.weight             =    2.0  
         # reward alternating foot contacts vs repeats
-        self.rewards.alternation_contact.weight           =   20.0  
+        self.rewards.alternation_contact.weight           =   0
         # reward progressive foot placement per cycle
-        self.rewards.progressive_step.weight              =    6.0  
+        self.rewards.progressive_step.weight              =    10.0  
         # per‐cycle foot‐contact correctness (+5 for exactly one each, else penalty)
-        self.rewards.foot_cycle_sym.weight                =   10  
+        self.rewards.foot_cycle_sym.weight                =   0#4
         # penalize asymmetric foot airtime
-        self.rewards.symmetric_foot_airtime.weight        =  -20
+        self.rewards.symmetric_foot_airtime.weight        =  0#
         self.rewards.symmetric_foot_airtime.params["diff_threshold"] = 5
         self.rewards.symmetric_foot_airtime.params["reward_good"] = 8
         # penalize foot sliding (squared speed during contact)
         self.rewards.feet_no_slip_condition.weight        =  -10.0  
+        # cycle based reward
+        self.rewards.paper_cycle_reward.weight            = 5
+        self.rewards.paper_cycle_reward.params["debug"]   = False
+
         # forward feet placement:
         # self.rewards.foot_forward_placement = 0.8
         # forward and progressive foot placement:

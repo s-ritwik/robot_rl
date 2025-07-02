@@ -449,7 +449,7 @@ def track_joint_angles_exp(
     return penalty
 
 
-def foot_phase_contact_amber(
+def foot_phase_cycle_reward(
     env: ManagerBasedRLEnv,
     period: float = 0.8,
     command_name: Optional[str] = "base_velocity",
@@ -459,52 +459,167 @@ def foot_phase_contact_amber(
     cmd_thresh: float      = 0.005,
 ) -> torch.Tensor:
     """
-    Reward shin‐contact matching the expected swing/stance phase,
-    but if the commanded velocity norm is < cmd_thresh then all contact
-    counts as “stance” (i.e. in-phase).
+    *Per‐cycle* reward:
+
+        +1  if **every** timestep of the *previous* cycle both shins were
+            in-phase with the analytic stance (or the robot was “idle”)
+        −2  otherwise.
+
+    The returned value is held constant throughout the *current* cycle so the
+    critic sees a stable signal.
     """
     N, dev = env.num_envs, env.device
+    t      = env.sim.current_time
 
-    # 1) compute which foot *should* be stance this instant
-    tp       = (env.sim.current_time % period) / period
-    phi      = math.sin(2 * math.pi * tp)
-    stance_i = 1 if phi > 0 else 0
+    # ------------------------------------------------------------------ #
+    # 1)  current cycle index
+    # ------------------------------------------------------------------ #
+    cycle_idx = int(math.floor(t / period))
 
-    # 2) if we have a command, build a mask of “idle” envs
+    # ------------------------------------------------------------------ #
+    # 2)  commanded speed → idle mask
+    # ------------------------------------------------------------------ #
     if command_name is not None:
-        cmd     = env.command_manager.get_command(command_name)[:, :2]  # [N,2]
-        idle    = torch.norm(cmd, dim=1) < cmd_thresh                   # bool[N]
+        cmd2D = env.command_manager.get_command(command_name)[:, :2]      # [N,2]
+        idle  = torch.norm(cmd2D, dim=1) < cmd_thresh                     # [N]
     else:
         idle = torch.zeros(N, device=dev, dtype=torch.bool)
 
-    # 3) fetch sensors
-    left_s   = env.scene.sensors[left_sensor_name]
-    right_s  = env.scene.sensors[right_sensor_name]
-    sensors  = [left_s, right_s]
+    # ------------------------------------------------------------------ #
+    # 3)  per-step stance correctness
+    # ------------------------------------------------------------------ #
+    tp       = (env.sim.current_time % period) / period
+    stance_i = 1 if math.sin(2 * math.pi * tp) > 0 else 0                # 0=L,1=R
 
-    # 4) build result
-    res = torch.zeros(N, device=dev)
+    sensors = [
+        env.scene.sensors[left_sensor_name],
+        env.scene.sensors[right_sensor_name],
+    ]
+    correct_flags = torch.ones(N, device=dev, dtype=torch.bool)
 
     for idx, sensor in enumerate(sensors):
-        # [N,hist,bodies,3] → max‐norm per env
         contact = (
-            sensor.data
-                  .net_forces_w_history
-                  .norm(dim=-1)      # [N,hist,bodies]
-                  .max(dim=1)[0]     # [N,bodies]
-                  .max(dim=1)[0]     # [N]
-                  > force_thresh     # bool[N]
+            sensor.data.net_forces_w_history
+                  .norm(dim=-1)            # [N,hist,bods]
+                  .max(dim=1)[0]           # [N,bods]
+                  .max(dim=1)[0]           # [N]
+                  > force_thresh
         )
+        # if idle this env is automatically “correct” for this foot
+        this_ok = idle | (contact ^ (idx != stance_i))
+        correct_flags &= this_ok                                              # AND across feet
 
-        # if idle, treat every contact as stance (i.e. always in‐phase)
+    # ------------------------------------------------------------------ #
+    # 4)  persistent per-cycle state
+    # ------------------------------------------------------------------ #
+    fn = foot_phase_cycle_reward
+    if not hasattr(fn, "_prev_cycle"):
+        fn._prev_cycle   = torch.full((N,), -1, device=dev, dtype=torch.long)
+        fn._cycle_good   = torch.ones((N,), device=dev, dtype=torch.bool)
+        fn._last_reward  = torch.zeros((N,), device=dev)
+
+    prev_cycle  = fn._prev_cycle
+    cycle_good  = fn._cycle_good
+    last_reward = fn._last_reward
+
+    # accumulate: if any step is bad, mark cycle_good=False
+    cycle_good &= correct_flags
+
+    # ------------------------------------------------------------------ #
+    # 5)  when new cycle begins, emit reward for the *previous* cycle
+    # ------------------------------------------------------------------ #
+    new_cycle = cycle_idx != prev_cycle
+    finished  = new_cycle & (prev_cycle >= 0)
+
+    if finished.any():
+        idx = finished.nonzero(as_tuple=False).flatten()
+        last_reward[idx] = torch.where(
+            cycle_good[idx],
+            torch.tensor(1.0, device=dev),     # perfect cycle
+            torch.tensor(-2.0, device=dev),    # had any out-of-phase step
+        )
+        # reset good-flag for the upcoming cycle
+        cycle_good[idx] = True
+
+    # update cycle index for envs that just entered a new one
+    prev_cycle[new_cycle] = cycle_idx
+
+    return last_reward
+
+
+def foot_phase_contact_amber(
+    env: ManagerBasedRLEnv,
+    period: float = 0.8,
+    command_name: Optional[str] = "base_velocity",
+    left_sensor_name: str  = "contact_forces_left",
+    right_sensor_name: str = "contact_forces_right",
+    force_thresh: float    = 1.0,
+    cmd_thresh: float      = 0.005,
+    debug: bool            = False,
+) -> torch.Tensor:
+    """
+    +1  for every foot that is *in phase* this step
+    −5  for every foot that is *out of phase* this step.
+
+    When the planar command speed-norm < `cmd_thresh`, treat both feet as
+    “allowed stance”, i.e. always award +1 and never penalise.
+    """
+    N, dev = env.num_envs, env.device
+
+    # -------------------------------------------------- phase → stance foot --
+    tp       = (env.sim.current_time % period) / period
+    phi      = math.sin(2 * math.pi * tp)
+    stance_i = 1 if phi > 0 else 0          # 0-left stance, 1-right stance
+
+    # ----------------------------------------------------- idle mask per env --
+    if command_name is not None:
+        cmd2D = env.command_manager.get_command(command_name)[:, :2]      # [N,2]
+        idle  = torch.norm(cmd2D, dim=1) < cmd_thresh                     # [N]
+    else:
+        idle = torch.zeros(N, device=dev, dtype=torch.bool)
+
+    # -------------------------------------------------------- contact flags --
+    sensors  = [
+        env.scene.sensors[left_sensor_name],
+        env.scene.sensors[right_sensor_name],
+    ]
+    contacts = []
+    for sensor in sensors:
+        c = (
+            sensor.data.net_forces_w_history
+                  .norm(dim=-1)            # [N,hist,bods]
+                  .max(dim=1)[0]           # [N,bods]
+                  .max(dim=1)[0]           # [N]
+                  > force_thresh
+        )
+        contacts.append(c)                 # list index 0=left, 1=right
+
+    # ------------------------------------------------ compute reward per env --
+    reward = torch.zeros(N, device=dev)
+
+    for idx, contact in enumerate(contacts):
         in_phase = torch.where(
             idle,
-            torch.ones_like(contact, dtype=torch.bool),
-            contact ^ (idx != stance_i)   # True if contact==(idx==stance_i)
+            torch.ones_like(contact, dtype=torch.bool),      # idle ⇒ always ok
+            contact ^ (idx != stance_i)                      # bool[N]
+        )
+        per_foot = torch.where(
+            in_phase,
+            torch.tensor(1.0,  device=dev),                  # +1  if good
+            torch.tensor(-2.0, device=dev)                   # –5  if bad
+        )
+        reward += per_foot
+
+    # -------------------------------------------- optional debug for env-0 --
+    if debug and N > 0:
+        print(
+            f"[{env.sim.current_time:6.3f}s] stance={'R' if stance_i else 'L'} "
+            f"idle={idle[0].item()}  "
+            f"Lc={contacts[0][0].item()} Rc={contacts[1][0].item()}  "
+            f"reward0={reward[0].item():.1f}"
         )
 
-        res += in_phase.float()
-    return res
+    return reward
 
 
 
@@ -935,8 +1050,8 @@ def alternative_linear_cycle(
     root_x  = pos[:,0,0]
     B       = pos.shape[1]
     # body_pos_w rows: [-2]=right, [-1]=left toe
-    rel_l   = pos[:, B-1, 0] - root_x
-    rel_r   = pos[:, B-2, 0] - root_x
+    rel_l   = pos[:, B-2, 0] - root_x
+    rel_r   = pos[:, B-1, 0] - root_x
 
     cmd_x    = env.command_manager.get_command(command_name)[:,0]
     dir_sign = torch.sign(cmd_x)
@@ -1215,6 +1330,49 @@ def track_lin_vel_x_amber(
 
     return final
 
+def _phi_contact_scalar(phi: float) -> float:
+    """ φ_contact(φ) = sin(2πφ) / √(sin²(2πφ)+0.04)  — Eq.(18) """
+    s = math.sin(2 * math.pi * phi)
+    return s / math.sqrt(s * s + 0.04)
+
+def rcs_phase_reward_no_pos(
+    env: ManagerBasedRLEnv,
+    Ts: float                   = 0.4,      # single-step duration
+    left_sensor_name: str       = "contact_forces_left",
+    right_sensor_name: str      = "contact_forces_right",
+    force_thresh: float         = 1.0,
+    debug: bool                 = False,
+) -> torch.Tensor:
+    """
+    r_cs = 9 · (1_R − 1_L) · φ_contact            [ NO foot-placement term ]
+
+    • Link order for Amber:  B-2  =  **left**  foot,  B-1 = **right** foot
+    • Outputs [N] reward, updated every step.
+    """
+    N, dev = env.num_envs, env.device
+    t      = env.sim.current_time
+
+    # φ_contact scalar for current moment
+    phi_cycle = (t % (2 * Ts)) / (2 * Ts)        # φ ∈ [0,1)
+    phi_cont  = _phi_contact_scalar(phi_cycle)   # float
+
+    # contact booleans
+    def contact(name: str) -> torch.Tensor:
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        return (
+            fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0] > force_thresh
+        )                                         # bool[N]
+
+    I_L = contact(left_sensor_name).float()      # [N]  (left foot: B-2)
+    I_R = contact(right_sensor_name).float()     # [N]  (right foot: B-1)
+
+    reward = 9.0 * (I_R - I_L) * phi_cont        # element-wise [N]
+
+    # optional debug print for env-0
+    if debug and N > 0:
+        print(f"[t={t:6.3f}s] φc={phi_cont:+.3f}  I_L={I_L[0]}  I_R={I_R[0]}  r0={reward[0]:+.2f}")
+
+    return reward
 
 ## Critic
 
@@ -1391,10 +1549,10 @@ def compute_step_location_local_amber(
     icp_0 = torch.zeros((r.shape[0], 3), device=env.device)
     icp_0[:, :2] = rdot[:, :2] / omega
 
-    # 5) foot positions from the last two body indices (B-2=right, B-1=left)
+    # 5) foot positions from the last two body indices (B-1=right, B-2=left)
     pos    = asset.data.body_pos_w                          # [N, bodies, 3]
     B      = pos.shape[1]
-    foot_pos = pos[:, [B-2, B-1], :]                        # [N,2,3]
+    foot_pos = pos[:, [B-1, B-2], :]                        # [N,2,3]
 
     # 6) phase clock (unchanged)
     tp    = (env.sim.current_time % (2*Tswing)) / (2*Tswing)
@@ -1467,6 +1625,7 @@ def compute_step_location_local_amber(
 
     # now write into it
     env.current_des_step[env_ids, :] = p[env_ids, :]
+    print(p)
     return p
 
 

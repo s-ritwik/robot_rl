@@ -155,6 +155,18 @@ class AmberRewardCfg(RewardsCfg):
             "cmd_thresh":         0.005,
         },
     )
+    phase_contact_per_cycle = RewTerm(
+        func   = mdp.foot_phase_cycle_reward,
+        weight = 10.0,      # positive; function already returns ± values
+        params = {
+            "period":             0.8,
+            "command_name":       "base_velocity",
+            "left_sensor_name":   "contact_forces_left",
+            "right_sensor_name":  "contact_forces_right",
+            "force_thresh":       1.0,
+            "cmd_thresh":         0.05,
+        },
+    )
     # rewards consecutive foot placements
     alternation_contact = RewTerm(
         func   = mdp.alternation_contact_reward,
@@ -223,17 +235,17 @@ class AmberRewardCfg(RewardsCfg):
         },
     )
     # penalises contact acc to time exponentially
-    # continuous_contact = RewTerm(
-    #     func   = mdp.continuous_contact_penalty,
-    #     weight = -1.0,               # negative because it’s a cost
-    #     params = {
-    #         "threshold":       0.10,   # seconds
-    #         "rate":           10.0,    # exponent growth
-    #         "min_cmd_speed":   0.05,
-    #         "left_sensor_name":  "contact_forces_left",
-    #         "right_sensor_name": "contact_forces_right",
-    #     },
-    # )
+    paper_cycle_reward = RewTerm(
+        func   = mdp.rcs_phase_reward_no_pos,
+        weight = 1.0,          # keep at 1.0 (formula already has 9×)
+        params = {
+            "Ts":                PERIOD/2,
+            "left_sensor_name":  "contact_forces_left",
+            "right_sensor_name": "contact_forces_right",
+            "force_thresh":      1.0,
+            "debug":             False,
+        },
+    )
     # no need to track angular yaw (z) or sideways velocity
     track_ang_vel_z = None
     # small alive bonus
