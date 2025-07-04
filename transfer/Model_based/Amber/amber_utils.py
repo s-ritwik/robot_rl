@@ -6,7 +6,9 @@ from isaaclab.utils.math import euler_xyz_from_quat, wrap_to_pi, quat_rotate_inv
 import omni.usd
 import math
 from source.robot_rl.robot_rl.tasks.manager_based.robot_rl.amber.amber_env_cfg import PERIOD,WDES
-
+import casadi as ca
+reference_step = ca.Function.load("transfer/Model_based/Amber/amber_reference_step.casadi")
+from pathlib import Path
 def get_projected_gravity(quat: np.ndarray) -> np.ndarray:
     """
     quat: [qw, qx, qy, qz]
@@ -19,6 +21,109 @@ def get_projected_gravity(quat: np.ndarray) -> np.ndarray:
     pg[2] = 1 - 2 * (qw * qw + qz * qz)
     return pg
 
+
+def debug_print_joints(amber, env_id: int = 0):
+    """
+    Prints the current q1_left, q2_left, q1_right, q2_right angles for the given env.
+    amber   : scene["Amber"]
+    env_id  : which env index to print (0…n_envs-1)
+    """
+    # pull names & positions
+    names = list(amber.data.joint_names)
+    pos   = amber.data.joint_pos.cpu().numpy()  # shape (n_envs, n_joints)
+    
+    # lookup indices
+    idx = { 
+        "q1_left":  names.index("q1_left"),
+        "q2_left":  names.index("q2_left"),
+        "q1_right": names.index("q1_right"),
+        "q2_right": names.index("q2_right"),
+    }
+    q = pos[env_id]  # 1D array of length n_joints
+
+    print(f"[DEBUG][env {env_id}] "
+          f"q1_left={180/math.pi*q[idx['q1_left']]:.4f}, "
+          f"q2_left={180/math.pi*q[idx['q2_left']]:.4f}, "
+          f"q1_right={180/math.pi*q[idx['q1_right']]:.4f}, "
+          f"q2_right={180/math.pi*q[idx['q2_right']]:.4f}")
+
+
+def feed_reference_trajectory(sim_time, scene, args_cli, ref_dir="/home/s-ritwik/src/cusadi/Amber/references"):
+    """
+    Load (once) and apply precomputed gait references to Amber.
+    Call this each step instead of the policy to drive pure replay.
+    """
+    amber = scene["Amber"]
+    device = amber.data.default_root_state.device
+    # print(amber.data.joint_names)
+    # —— one‐time load & cache ——
+    if not hasattr(feed_reference_trajectory, "loaded"):
+        ref_path = Path(ref_dir)
+        vxs      = np.load(ref_path / "amber_vxs.npy")
+        ts       = np.load(ref_path / "amber_reference_ts.npy")
+        q_refs   = np.load(ref_path / "amber_reference_qs.npy")           # (n_vx, N, 4)
+        T        = float(ts.max())
+        # pick the closest precomputed speed
+        vx       = float(args_cli.desired_vel[0])
+        ix       = int(np.argmin(np.abs(vxs - vx)))
+
+        feed_reference_trajectory.vxs            = vxs
+        feed_reference_trajectory.ts             = ts
+        feed_reference_trajectory.q_refs         = q_refs
+        feed_reference_trajectory.T              = T
+        feed_reference_trajectory.ix             = ix
+        feed_reference_trajectory.actuated_names = actuated_names = ["q1_left","q2_left","q1_right","q2_right"]
+
+        feed_reference_trajectory.loaded         = True
+
+    ts       = feed_reference_trajectory.ts
+    q_refs   = feed_reference_trajectory.q_refs
+    T        = feed_reference_trajectory.T
+    ix       = feed_reference_trajectory.ix
+    names    = feed_reference_trajectory.actuated_names
+
+    # —— compute current phase & indices ——
+    phase   = sim_time % T
+    idx_l   = int(np.argmin(np.abs(ts - phase)))
+    # half-cycle shift for right leg:
+    phase_r = (phase + T/2.0) % T
+    idx_r   = int(np.argmin(np.abs(ts - phase_r)))
+
+    # extract joint arrays
+    # q_l = q_refs[ix, idx_l, :2]   # left-leg joints
+    # q_r = q_refs[ix, idx_r, 2:4]  # right-leg joints
+    q1_l = float(q_refs[ix, idx_l, 0])
+    q2_l = float(q_refs[ix, idx_l, 1])
+    q1_r = float(q_refs[ix, idx_r, 2])
+    q2_r = float(q_refs[ix, idx_r, 3])
+    # —— scatter into a full (1×7) target and send to sim ——
+    default_all   = amber.data.default_joint_pos.clone()  # (1,7) tensor
+    print(default_all)
+    joint_targets = default_all.clone()
+    # target_np     = np.hstack([q_l, q_r])                # shape (4,)
+    target_np = np.array([q1_l, q2_l,q1_r, q2_r], dtype=np.float32)
+
+    target_tensor = torch.from_numpy(target_np).to(device).unsqueeze(0)  # (1,4)
+    all_names     = list(amber.data.joint_names)
+    # print("Available joint_names:")
+    # for j_idx, j_name in enumerate(all_names):
+    #     print(f"  [{j_idx}] {j_name}")
+
+    # DEBUG: print mapping from actuated_names to indices
+    print("Mapping actuated_names -> joint_names indices:")
+    for i, name in enumerate(feed_reference_trajectory.actuated_names):
+        if name in all_names:
+            idx = all_names.index(name)
+            val = target_tensor[0, i].item()
+            print(f"  actuated[{i}] '{name}' -> joint_names[{idx}] (setting value {val*180/math.pi:.4f})")
+            joint_targets[:, idx] = target_tensor[0, i]
+        else:
+            print(f"  actuated[{i}] '{name}' NOT FOUND in joint_names!")
+    # for i, name in enumerate(names):
+    #     idx = all_names.index(name)
+    #     joint_targets[:, idx] = target_tensor[0, i]
+
+    amber.set_joint_position_target(joint_targets)
 
 
 def compute_step_location_local(
@@ -43,6 +148,12 @@ def compute_step_location_local(
         # force an immediate first‐update at t=0
         compute_step_location_local._last_time = -Tswing
         compute_step_location_local._last_p    = torch.zeros((n_envs, 3), device=device)
+        # capture each foot’s original lateral world‐Y offsets:
+        pos0 = amber.data.body_pos_w               # (n_envs, n_bodies, 3)
+        B    = pos0.shape[1]
+        feet0 = pos0[:, [B-1, B-2], :]             # (n_envs, 2, 3)
+        # store as (n_envs,2) so we can pick left/right later
+        compute_step_location_local._orig_foot_y = feet0[:, :, 1].clone()
 
     # check if we crossed a half‐cycle boundary
     if (sim_time - compute_step_location_local._last_time) >= Tswing:
@@ -54,7 +165,7 @@ def compute_step_location_local(
         # print(command)
         # 2) COM position in world from body index 3 [N,3]
         r = amber.data.body_pos_w[:, 3, :]                 
-        # print(r)
+        # print("com:",r)
         # 3) build ICP base
         omega = math.sqrt(9.81 / nom_height)
         icp_0 = torch.zeros((n_envs, 3), device=device)
@@ -103,8 +214,14 @@ def compute_step_location_local(
 
         # 10) back to world, zero Z
         p = to_global(p_local, amber.data.root_quat_w) + r
+        # print("quat root:",amber.data.root_quat_w[3])
         p[:, 2] = 0.0
-
+        # --- OVERRIDE lateral step to your robot’s original Y ---
+        # swing foot index = the opposite of stance_idx
+        swing_idx = 1 - stance_idx
+        # orig_foot_y: (n_envs,2)  → pick the correct column
+        orig_y = compute_step_location_local._orig_foot_y[:, swing_idx]
+        p[:, 1] = orig_y
         # store for reuse
         compute_step_location_local._last_time = sim_time
         compute_step_location_local._last_p    = p.clone()
@@ -146,6 +263,34 @@ def compute_step_location_local(
 
     return p
 
+
+def sinusoid_test(amber, sim_time, amplitude=0.5, frequency=0.5):
+    """
+    Drive q2_left and q2_right joints on a sine wave.
+    
+    amber     : scene["Amber"] handle
+    sim_time  : current simulation time (seconds)
+    amplitude : peak deflection in radians
+    frequency : oscillation rate in Hz
+    """
+    # 1) grab the default joint‐pose tensor (n_envs × n_joints)
+    target = amber.data.default_joint_pos.clone()
+    
+    # 2) compute sine value
+    phase  = 2 * math.pi * frequency * sim_time
+    s      = amplitude * math.sin(phase)
+    
+    # 3) find indices
+    names  = amber.data.joint_names  # list of strings
+    idx_l  = names.index("q2_left")
+    idx_r  = names.index("q2_right")
+    print("angle given:",s)
+    # 4) assign to all envs
+    target[:, idx_l] = s
+    target[:, idx_r] = s
+    
+    # 5) send to sim
+    amber.set_joint_position_target(target)
 
 
 def run_simulator(sim, scene, policy, simulation_app, args_cli):
@@ -204,7 +349,7 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 projected_gravity=get_projected_gravity(quat),
                 des_vel=     des_vel,
             )
-            # _ = policy.get_action(obs.to(device))   # updates policy.action_isaac
+            _ = policy.get_action(obs.to(device))   # updates policy.action_isaac
             action_isaac = policy.action_isaac       # (4,)
 
             # ─── Convert to torch targets ───
@@ -213,25 +358,34 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
             joint_targets = default_all.clone()
 
             # scatter into exactly those 4 actuated joints
-            actuated_names = ["q1_left","q2_left","q1_right","q2_right"]
+            actuated_names = actuated_names = ["q1_left","q1_right","q2_left","q2_right"]
+
             all_names      = list(amber.data.joint_names)
             for i, name in enumerate(actuated_names):
                 idx = all_names.index(name)
                 joint_targets[:, idx] = target_tensor[0, i]
 
-            amber.set_joint_position_target(joint_targets)
+            # amber.set_joint_position_target(joint_targets)
+            # sinusoid_test(amber, sim_time, amplitude=0.5, frequency=2)
 
+            feed_reference_trajectory(sim_time, scene, args_cli)
             # ─── Log CSV ───
             cur_pos = amber.data.joint_pos.cpu().numpy()
             for env_id in range(n_envs):
                 writer.writerow([count, sim_time, env_id, *cur_pos[env_id]])
             if count % 100 == 0:
                 csv_fh.flush()
-
+            
             # ─── Step physics ───
             scene.write_data_to_sim()
             sim.step()
+            qpos = amber.data.joint_pos.cpu().numpy()[0]
+            qvel = amber.data.joint_vel.cpu().numpy()[0]
+            print(f" q2_left pos={np.degrees(qpos[5]):.4f}°, vel={np.degrees(qvel[5]):.4f}°/s")
+            print(f" q2_right pos={np.degrees(qpos[6]):.4f}°, vel={np.degrees(qvel[6]):.4f}°/s")    
             scene.update(sim_dt)
+            for eid in range(amber.data.joint_pos.shape[0]):
+                debug_print_joints(amber, env_id=eid)
             sim_time += sim_dt
             count   += 1            
         
@@ -255,7 +409,7 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 wdes      = WDES,
                 visualize = True
             )
-            print(f"[INFO] Next desired step: {next_foot.cpu().numpy()}, time:{sim_time}")
+            # print(f"[INFO] Next desired step: {next_foot.cpu().numpy()}, time:{sim_time}")
 
             # ─────────────────────────── contact-based reset of torso ──────────────────
             forces      = scene["contact_forces"].data.net_forces_w  # (n_envs, n_sensors, 3)

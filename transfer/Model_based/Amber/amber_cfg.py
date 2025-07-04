@@ -12,8 +12,8 @@ from pxr import Gf, UsdPhysics, UsdGeom
 
 
 # … (copy over your ROBOT_ASSETS_AMBER, AMBER_CONFIG, NewRobotsSceneCfg) …
-STIFFNESS = 500
-DAMPING = 25
+STIFFNESS = 10000000
+DAMPING =100000
 # --- AMBER ROBOT CONFIGURATION ---
 ROBOT_ASSETS_AMBER = "/home/s-ritwik/src/robot_rl/robot_assets/amber5/amber"
 
@@ -83,14 +83,14 @@ AMBER_CONFIG = ArticulationCfg(
         "right_thigh_act": ImplicitActuatorCfg(
             joint_names_expr=["q1_right"],
             effort_limit_sim=400.0,
-            velocity_limit_sim=4.0,
+            velocity_limit_sim=20.0,
             stiffness=STIFFNESS,
             damping=DAMPING,
         ),
         "right_shin_act": ImplicitActuatorCfg(
             joint_names_expr=["q2_right"],
             effort_limit_sim=400.0,
-            velocity_limit_sim=5.0,
+            velocity_limit_sim=20.0,
             stiffness=STIFFNESS,
             damping=DAMPING,
         ),

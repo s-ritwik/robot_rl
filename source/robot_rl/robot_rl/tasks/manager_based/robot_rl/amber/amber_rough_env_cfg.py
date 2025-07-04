@@ -166,13 +166,13 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # Reward phase based contacts: stance and wing
         self.rewards.phase_contact_per_cycle.weight       =  0
         # punish large arm joint deviations
-        self.rewards.joint_angles.weight                  =   -.4#-4.0  
+        self.rewards.joint_angles.weight                  =   -.2#-4.0  
         # reward maintaining torso upright within window, penalize beyond threshold
         self.rewards.torso_orientation.weight             =    0.2#2.0  
         # reward alternating foot contacts vs repeats
         self.rewards.alternation_contact.weight           =   0
         # reward progressive foot placement per cycle
-        self.rewards.progressive_step.weight              =    0#15.0  
+        self.rewards.progressive_step.weight              =    0.1#15.0  
         # per‐cycle foot‐contact correctness (+5 for exactly one each, else penalty)
         self.rewards.foot_cycle_sym.weight                =   0#4
         # penalize asymmetric foot airtime
@@ -185,7 +185,9 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         self.rewards.paper_cycle_reward.weight            = 2#5
         self.rewards.paper_cycle_reward.params["debug"]   = False
         # Reward for contact step ahead of com
-        self.rewards.com_step_reward.weight               = 15
+        self.rewards.com_step_reward.weight               = 0
+        self.rewards.com_step_reward.params["debug"]      = False
+
         # forward feet placement:
         # self.rewards.foot_forward_placement = 0.8
         # forward and progressive foot placement:
