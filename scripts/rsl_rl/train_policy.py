@@ -10,8 +10,9 @@ import sys
 from datetime import datetime
 from dataclasses import asdict, is_dataclass
 from typing import Any, Sequence
+from torch.utils.tensorboard import SummaryWriter 
 
-# Isaac‑Lab / project imports ---------------------------------------------------
+# Isaac-Lab / project imports ---------------------------------------------------
 from isaaclab.app import AppLauncher
 import cli_args
 
@@ -32,7 +33,7 @@ def to_plain_dict(cfg: Any) -> dict:
 
 
 def set_nested_dict(dct: dict, keys: Sequence[str], value: Any) -> None:
-    """Recursively set ``dct[k1][k2]… = value`` creating sub‑dicts as needed."""
+    """Recursively set ``dct[k1][k2]… = value`` creating sub-dicts as needed."""
     for key in keys[:-1]:
         dct = dct.setdefault(key, {})
     dct[keys[-1]] = value
@@ -69,6 +70,7 @@ ENVIRONMENTS = {
     "height-scan-flat": "G1-height-scan-flat",
     "flat-hzd": "G1-flat-hzd",
     "rough": "G1-rough-clf",
+    "slight-rough": "G1-slight-rough-clf",
 }
 
 
@@ -81,10 +83,10 @@ def parse_args():
     parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel envs.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument("--max_iterations", type=int, default=None, help="Training iterations.")
-    parser.add_argument("--distributed", action="store_true", help="Enable multi‑GPU training.")
+    parser.add_argument("--distributed", action="store_true", help="Enable multi-GPU training.")
     parser.add_argument("--grid_sweep", action="store_true", help="Enable grid sweep mode.")
 
-    # Isaac‑Lab / RSL‑RL pass‑throughs
+    # Isaac-Lab / RSL-RL pass-throughs
     cli_args.add_rsl_rl_args(parser)
     AppLauncher.add_app_launcher_args(parser)
 
@@ -108,7 +110,7 @@ def main():
     # Forward unknown CLI fragments to Hydra
     sys.argv = [sys.argv[0]] + hydra_args
 
-    # Boot up Omniverse / Isaac‑Lab ------------------------------------------------
+    # Boot up Omniverse / Isaac-Lab ------------------------------------------------
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
 
@@ -135,7 +137,7 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
 
     # ----------------------------------------------------------------------
-    # Hydra‑wrapped training function --------------------------------------
+    # Hydra-wrapped training function --------------------------------------
     # ----------------------------------------------------------------------
     @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
     def train(
@@ -183,8 +185,19 @@ def main():
                     set_nested_dict(cfg_dict, key_path, val)
 
                     # tag run name -------------------------------------------------------
-                    suffix = "_".join(full_path.split("."))
-                    run_name_parts.append(f"{suffix}_{str(val).replace('.', 'p')}")
+                    # Use a shorter name for the override in the run name
+                    if full_path not in ["agent.resume", "agent.resume_path"]:
+                        # Use a shorter name for the override in the run name
+                        name_path = full_path
+                        if name_path.startswith("env.rewards."):
+                            name_path = name_path.removeprefix("env.rewards.")
+                        elif name_path.startswith("agent.algorithm."):
+                            name_path = name_path.removeprefix("agent.algorithm.")
+                        elif name_path.startswith("algorithm."):
+                            name_path = name_path.removeprefix("algorithm.")
+
+                        suffix = "_".join(name_path.split("."))
+                        run_name_parts.append(f"{suffix}_{str(val).replace('.', 'p')}")
                     print(
                         f"[INFO] Overrode {'env' if cfg_root is env_cfg else 'agent'} "
                         f"param {'.'.join(key_path)} = {val}"
@@ -232,7 +245,7 @@ def main():
             print_dict(video_kwargs, nesting=4)
             env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
-        # RSL‑RL VecEnv wrapper ---------------------------------------------
+        # RSL-RL VecEnv wrapper ---------------------------------------------
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg_dict.get("clip_actions"))
 
         # 7. Runner -----------------------------------------------------------
@@ -244,8 +257,37 @@ def main():
         ):
             print(f"[INFO] Resuming from checkpoint: {agent_cfg_dict['resume_path']}")
             runner.load(agent_cfg_dict["resume_path"])
+            
+            # --- ▼▼ CORRECTED RESUME LOGIC ▼▼ ---
+            # 1. Force the runner to use the NEW log directory, not the old one.
+            runner.log_dir = log_dir
+
+            # 2. Reset the TensorBoard writer to point to the new directory.
+            if hasattr(runner, 'writer') and runner.writer is not None:
+                runner.writer.close() # Close the old writer first
+                runner.writer = SummaryWriter(log_dir=runner.log_dir)
 
         # 8. Persist configs --------------------------------------------------
+        reward_terms_to_check = [
+            "clf_decreasing_condition",
+            "clf_reward",
+            "holonomic_constraint",
+            "holonomic_constraint_vel",
+        ]
+        # Check if the rewards dictionary exists before trying to modify it
+        if "rewards" in env_cfg_dict:
+            for term_name in reward_terms_to_check:
+                # Check if the live object has the reward term
+                if hasattr(env_cfg.rewards, term_name):
+                    term_instance = getattr(env_cfg.rewards, term_name)
+                    # Add the term to the dictionary if it's not None
+                    if term_instance is not None:
+                        if term_name not in env_cfg_dict["rewards"]:
+                            print(f"[INFO] Manually adding '{term_name}' to env.yaml log.")
+                            # Use to_plain_dict to convert the RewTerm object to a dictionary
+                            env_cfg_dict["rewards"][term_name] = to_plain_dict(term_instance)
+        
+        os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg_dict)
         dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg_dict)
         dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
@@ -255,7 +297,7 @@ def main():
         runner.learn(num_learning_iterations=agent_cfg_dict["max_iterations"], init_at_random_ep_len=True)
         env.close()
 
-    # Execute Hydra‑wrapped training -----------------------------------------
+    # Execute Hydra-wrapped training -----------------------------------------
     train()
     simulation_app.close()
 

@@ -74,4 +74,8 @@ transfer/obelisk/build/
 
 *.csv
 
+*.html
+
+*.txt
+
 transfer/obelisk/.vscode/

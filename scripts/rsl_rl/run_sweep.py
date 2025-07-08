@@ -47,6 +47,12 @@ NOTE: Use '--' to separate the sweep script's arguments from the arguments
         nargs='+',
         help="Define a grid sweep. Format: 'param_name:val1,val2,...'"
     )
+    parser.add_argument(
+        "--resume_path",
+        type=str,
+        default=None,
+        help="Path to a checkpoint (.pt) file to resume training from."
+    )
 
     args, pass_through_args = parser.parse_known_args()
 
@@ -78,10 +84,23 @@ NOTE: Use '--' to separate the sweep script's arguments from the arguments
         for combo in value_combinations:
             run_env = os.environ.copy()
             combo_str_parts = []
+            param_overrides = []
             for i, value in enumerate(combo):
                 param_name = param_names[i]
-                run_env[f"PARAM_OVERRIDE_{i}"] = f"{param_name}={value}"
+                param_overrides.append(f"{param_name}={value}")
                 combo_str_parts.append(f"{param_name}={value}")
+
+            # If resuming, add the resume parameters to the overrides
+            if args.resume_path:
+                print(f"   -> Resuming from checkpoint: {args.resume_path}")
+                param_overrides.append("agent.resume=True")
+                # Use an absolute path to be safe
+                abs_resume_path = os.path.abspath(args.resume_path)
+                param_overrides.append(f"agent.resume_path={abs_resume_path}")
+
+            # Set the environment variables from the collected overrides
+            for i, override_str in enumerate(param_overrides):
+                run_env[f"PARAM_OVERRIDE_{i}"] = override_str
             
             print(f"🚀 Starting run with {', '.join(combo_str_parts)}")
             print("-" * 80)

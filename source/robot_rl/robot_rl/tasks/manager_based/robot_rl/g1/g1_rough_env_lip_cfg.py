@@ -43,43 +43,11 @@ class CurriculumCfg:
 # Lip specific rewards
 ##
 class G1RoughLipRewards(HumanoidRewardCfg):
-    """Rewards specific to LIP Model"""
-
-    holonomic_constraint = RewTerm(
-        func=mdp.holonomic_constraint,
-        weight=4.0,
-        params={
-            "command_name": "hlip_ref",
-            "z_offset": 0.036,
-        }
-    )
-
-    holonomic_constraint_vel = RewTerm(
-        func=mdp.holonomic_constraint_vel,
-        weight=2.0,
-        params={
-            "command_name": "hlip_ref",
-        }
-    )
-
-    clf_reward = RewTerm(
-        func=mdp.clf_reward,
-        weight=10.0,
-        params={
-            "command_name": "hlip_ref",
-            "max_clf": 100.0,
-        }
-    )
-
-    clf_decreasing_condition = RewTerm(
-        func=mdp.clf_decreasing_condition,
-        weight=-2.0,
-        params={
-            "command_name": "hlip_ref",
-            "max_clf_decreasing": 200.0,
-            "alpha": 1.0,
-        }
-    )
+    """Rewards specific to the LIP Model, with declared custom terms."""
+    holonomic_constraint: RewTerm = None
+    holonomic_constraint_vel: RewTerm = None
+    clf_reward: RewTerm = None
+    clf_decreasing_condition: RewTerm = None
 
 
 
@@ -96,6 +64,28 @@ class G1RoughLipEnvCfg(HumanoidEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
+        
+        
+        self.rewards.holonomic_constraint = RewTerm(
+            func=mdp.holonomic_constraint,
+            weight=4.0,
+            params={"command_name": "hlip_ref", "z_offset": 0.036},
+        )
+        self.rewards.holonomic_constraint_vel = RewTerm(
+            func=mdp.holonomic_constraint_vel,
+            weight=2.0,
+            params={"command_name": "hlip_ref"},
+        )
+        self.rewards.clf_reward = RewTerm(
+            func=mdp.clf_reward,
+            weight=10.0,
+            params={"command_name": "hlip_ref", "max_clf": 100.0},
+        )
+        self.rewards.clf_decreasing_condition = RewTerm(
+            func=mdp.clf_decreasing_condition,
+            weight=-2.0,
+            params={"command_name": "hlip_ref", "max_clf_decreasing": 200.0, "alpha": 1.0},
+        )
         
         ##
         # Scene
@@ -138,9 +128,9 @@ class G1RoughLipEnvCfg(HumanoidEnvCfg):
         ##
         # Commands
         ##
-        self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0)
-        self.commands.base_velocity.ranges.lin_vel_y = (-0.4, 0.4)
-        self.commands.base_velocity.ranges.ang_vel_z = (-0.3, 0.3)
+        self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0) # was -1 - 1
+        self.commands.base_velocity.ranges.lin_vel_y = (-0.4, 0.4) # was -0.4 - 0.4
+        self.commands.base_velocity.ranges.ang_vel_z = (-0.3, 0.3) # was -0.3 - 0.3
 
         ##
         # Terminations
@@ -162,8 +152,8 @@ class G1RoughLipEnvCfg(HumanoidEnvCfg):
         self.rewards.joint_deviation_hip = None
         self.rewards.contact_no_vel = None
         self.rewards.alive = None
-        self.rewards.track_lin_vel_xy_exp = None
-        self.rewards.track_ang_vel_z_exp = None
+        #self.rewards.track_lin_vel_xy_exp = None
+        #self.rewards.track_ang_vel_z_exp = None 
         # self.rewards.track_ang_vel_z_exp.weight = 1.0
  
         # torque, acc, vel, action rate regularization
@@ -216,7 +206,7 @@ class G1RoughLipEnvCfg_PLAY(G1RoughLipEnvCfg):
         self.events.base_external_force_torque = None
         # self.events.push_robot = None
         self.events.push_robot.interval_range_s = (3.5, 3.5)
-        self.events.push_robot.params["velocity_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0)}
+        self.events.push_robot.params["velocity_range"] = {"x": (1.6, 1.6), "y": (1.6, 1.6)}
         self.events.reset_base.params["pose_range"] = {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (0,0)} #(-3.14, 3.14)},
         self.scene.terrain.terrain_generator.num_rows = 1
         self.scene.terrain.terrain_generator.num_cols = 2
