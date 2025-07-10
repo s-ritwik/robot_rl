@@ -14,7 +14,7 @@ from isaaclab.managers import TerminationTermCfg, SceneEntityCfg
 # from isaaclab.managers.reset_manager import ResetCallback
 from isaaclab.assets import AssetBaseCfg
 import robot_rl.tasks.manager_based.robot_rl.amber.mdp as mdp
-from isaaclab.managers import EventTermCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 
 
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
@@ -49,7 +49,7 @@ class AmberActionsCfg:
     )
 
 # TODO: Try playing with the period for the lip model
-PERIOD = 0.8 #0.6 #0.8  # (0.4 s swing phase)
+PERIOD = 1.2 #0.6 #0.8  # (0.4 s swing phase)
 WDES=0.0
 
 @configclass
@@ -61,6 +61,13 @@ class AmberObservationsCfg(ObservationsCfg):
         # no base linear vel sensor (we only command it, not observe it directly)
         base_lin_vel = None # not avvail
         height_scan = None
+
+        # future_feet = ObsTerm(
+        #     func            = mdp.future_foot_targets_lip,
+        #     history_length  = 1,
+        #     noise           = None,        # or Unoise() if you like
+        #     scale           = 1.0,         # optional scaling
+        # )
         # base_ang_vel= None
         # angular velocity around Y (planar pitch rate; mdp.base_ang_vel returns [wx, wy, wz])
         base_ang_vel = ObsTerm(
@@ -287,19 +294,25 @@ class AmberRewardCfg(RewardsCfg):
             "debug":             False,
         },
     )
+    
     # no need to track angular yaw (z) or sideways velocity
     track_ang_vel_z = None
     # small alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=0.1)
 
-from isaaclab.managers import EventTermCfg as EventTerm
 
 @configclass
 class AmberEventsCfg(EventCfg):
     """You can insert random pushes or mass‐perturbation here if desired."""
-    
-
-
+    # print_foot_positions = EventTerm(
+    #     func=mdp.print_foot_positions,
+    #     mode="interval",
+    #     interval_range_s=(PERIOD/2., PERIOD/2.),
+    #     is_global_time=False,
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot"),
+    #     },
+    # )
 @configclass
 class AmberEnvCfg(LocomotionVelocityRoughEnvCfg):
     """Environment config for planar Amber to track forward speed."""

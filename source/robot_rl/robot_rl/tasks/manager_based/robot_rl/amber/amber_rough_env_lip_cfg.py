@@ -14,13 +14,54 @@ from robot_rl.tasks.manager_based.robot_rl.amber import mdp
 from .amber_rough_env_cfg import AmberRoughEnvCfg
 from robot_rl.tasks.manager_based.robot_rl.amber.amber_env_cfg import (
     PERIOD,
-    EventCfg,
-    WDES
+    AmberEventsCfg,
+    WDES,
+    AmberObservationsCfg,
+    AmberRewardCfg
     )
+from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
+    LocomotionVelocityRoughEnvCfg,
+    ObservationsCfg,
+    RewardsCfg,
+    EventCfg,
+)
 ##
 # Pre-defined configs
 ##
-
+@configclass
+class AmberRoughLipObsCfg(AmberObservationsCfg):
+    @configclass
+    class PolicyCfg(AmberObservationsCfg.PolicyCfg):
+        future_feet = ObsTerm(
+            func            = mdp.future_foot_targets_lip,
+            history_length  = 1,
+            noise           = None,        # or Unoise() if you like
+            scale           = 1.0,         # optional scaling
+        )
+        current_feet = ObsTerm(
+            func           = mdp.current_foot_positions,
+            history_length = 1,
+            noise          = Unoise(n_min=-0.01, n_max=0.01),
+            scale          = 1.0,   # no extra scaling
+        )
+    @configclass
+    class CriticCfg(AmberObservationsCfg.CriticCfg):
+        # inherit everything the base critic had...
+        future_feet = ObsTerm(
+            func=mdp.future_foot_targets_lip,
+            history_length=1,
+            noise=None,
+            scale=1.0,
+        )
+        current_feet = ObsTerm(
+            func=mdp.current_foot_positions,
+            history_length=1,
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+            scale=1.0,
+        )
+    
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
 
 ##
 # LIP Specific Constants
@@ -29,37 +70,51 @@ from robot_rl.tasks.manager_based.robot_rl.amber.amber_env_cfg import (
 ##
 # Lip specific rewards
 ##
-# class G1RoughLipRewards(AmberRewardCfg):
-#     """Rewards specific to LIP Model"""
-#     # lip_gait_tracking = RewTerm(
-#     #     func=mdp.lip_gait_tracking,
-#     #     weight=0.0,
-#     #     params={
-#     #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-#     #         "period": PERIOD,
-#     #         "std": 0.2,
-#     #         "nom_height": 0.78,
-#     #         "Tswing": PERIOD/2.,
-#     #         "command_name": "base_velocity",
-#     #         "wdes": WDES,
-#     #         "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-#     #     }
-#     # )
+class AmberRoughLipRewards(AmberRewardCfg):
+    """Rewards specific to LIP Model"""
+    # lip_gait_tracking = RewTerm(
+    #     func=mdp.lip_gait_tracking,
+    #     weight=0.0,
+    #     params={
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+    #         "period": PERIOD,
+    #         "std": 0.2,
+    #         "nom_height": 0.78,
+    #         "Tswing": PERIOD/2.,
+    #         "command_name": "base_velocity",
+    #         "wdes": WDES,
+    #         "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+    #     }
+    # )
+    lip_rcs_phase = RewTerm(
+        func   = mdp.rcs_phase_reward,
+        weight = 1.0,                   # scale as you see fit
+        params = {
+            "Ts":                0.4,
+            "left_sensor_name":  "contact_forces_left",
+            "right_sensor_name": "contact_forces_right",
+            "force_thresh":      1.0,
+            "sigma":             0.05,  # e.g. try 5 cm spread
+            "asset_cfg":         SceneEntityCfg("robot"),
+            "debug":             False,
+        },
+    )
+    # lip_feet_tracking = RewTerm(
+    #     func=mdp.lip_feet_tracking,
+    #     weight=10.0,
+    #     params={
+    #         "period": PERIOD,
+    #         "std": 0.2,
+    #         "Tswing": PERIOD/2.,
+    #         "feet_bodies": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+    #     }
+    # )
 
-#     # lip_feet_tracking = RewTerm(
-#     #     func=mdp.lip_feet_tracking,
-#     #     weight=10.0,
-#     #     params={
-#     #         "period": PERIOD,
-#     #         "std": 0.2,
-#     #         "Tswing": PERIOD/2.,
-#     #         "feet_bodies": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-#     #     }
-#     # )
+
 
 
 @configclass
-class AmberRoughLipEventsCfg(EventCfg):
+class AmberRoughLipEventsCfg(AmberEventsCfg):
     # Calculate new step location on a fixed interval
     update_step_location = EventTerm(func=mdp.compute_step_location_local_amber,
                                      mode="interval",
@@ -93,10 +148,12 @@ class AmberRoughLipEnvCfg(AmberRoughEnvCfg):
     """Configuration for the Amber Flat environment."""
     # rewards: G1RoughLipRewards = G1RoughLipRewards()
     events: AmberRoughLipEventsCfg = AmberRoughLipEventsCfg()
-
+    observations: AmberRoughLipObsCfg = AmberRoughLipObsCfg()
+    rewards : AmberRoughLipRewards = AmberRoughLipRewards()
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
+
 
         # ##
         # # Scene

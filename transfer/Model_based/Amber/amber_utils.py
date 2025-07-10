@@ -6,7 +6,8 @@ from isaaclab.utils.math import euler_xyz_from_quat, wrap_to_pi, quat_rotate_inv
 import omni.usd
 import math,time
 from source.robot_rl.robot_rl.tasks.manager_based.robot_rl.amber.amber_env_cfg import PERIOD,WDES
-PERIOD=1
+from transfer.Model_based.Amber.amber_cfg import PERIOD, WDES
+# PERIOD=0.2
 Swing_ht=0.08
 import casadi as ca
 reference_step = ca.Function.load("transfer/Model_based/Amber/amber_reference_step.casadi")
@@ -105,7 +106,45 @@ def debug_print_joints(amber, env_id: int = 0):
           f"q1_right={180/math.pi*q[idx['q1_right']]:.4f}, "
           f"q2_right={180/math.pi*q[idx['q2_right']]:.4f}")
 
+def draw_foot_trajectory(
+    scene,
+    foot_w_stack,                 # 6×N CasADi DM  or  NumPy/torch (row: Lx,Rx,Ly,Ry,Lz,Rz)
+    spacing: int = 2,             # plot every N/spacing samples
+    color_left=(0.0, 1.0, 0.0),   # green dots for left foot
+    color_right=(1.0, 1.0, 0.0),  # yellow dots for right foot
+):
+    """
+    Drop small spheres along the planned swing/stance paths for both feet.
+    `foot_w_stack` is the same 6×N DM you pass to the IK routine.
+    """
+    # convert → NumPy (handles DM, torch, ndarray transparently)
+    data_np = np.asarray(foot_w_stack).astype(float)   # shape (6,N)
+    N       = data_np.shape[1]
 
+    stage = omni.usd.get_context().get_stage()
+
+    for k in range(0, N, spacing):
+        Lx, Rx, Ly, Ry, Lz, Rz = data_np[:, k]
+
+        # left-foot point ------------------------------------------------------
+        path_L = f"/World/debug/traj_left_{k}"
+        if not stage.GetPrimAtPath(path_L):
+            sph_L = UsdGeom.Sphere.Define(stage, path_L)
+            sph_L.GetRadiusAttr().Set(0.01)
+            sph_L.CreateDisplayColorAttr().Set([Gf.Vec3f(*color_left)])
+        else:
+            sph_L = UsdGeom.Sphere(stage.GetPrimAtPath(path_L))
+        UsdGeom.XformCommonAPI(sph_L).SetTranslate(Gf.Vec3d(Lx, Ly, Lz))
+
+        # right-foot point -----------------------------------------------------
+        path_R = f"/World/debug/traj_right_{k}"
+        if not stage.GetPrimAtPath(path_R):
+            sph_R = UsdGeom.Sphere.Define(stage, path_R)
+            sph_R.GetRadiusAttr().Set(0.01)
+            sph_R.CreateDisplayColorAttr().Set([Gf.Vec3f(*color_right)])
+        else:
+            sph_R = UsdGeom.Sphere(stage.GetPrimAtPath(path_R))
+        UsdGeom.XformCommonAPI(sph_R).SetTranslate(Gf.Vec3d(Rx, Ry, Rz))
 def feed_reference_trajectory(sim_time, scene, args_cli, ref_dir="/home/s-ritwik/src/cusadi/Amber/references"):
     """
     Load (once) and apply precomputed gait references to Amber.
@@ -184,6 +223,49 @@ def feed_reference_trajectory(sim_time, scene, args_cli, ref_dir="/home/s-ritwik
     amber.set_joint_position_target(joint_targets)
 
 
+def draw_step_and_com(
+    scene,
+    foot_pos: torch.Tensor,        # shape (n_envs, 3) world-frame targets
+    color_step=(0.0, 0.6, 1.0),    # light-blue foot marker
+    color_com=(1.0, 0.0, 0.0),     # red COM marker
+):
+    """
+    Draw/update a 2 cm sphere at each future foot position and a 10 cm sphere
+    at each COM position (body index 3).  Re-usable across iterations.
+    """
+    amber   = scene["Amber"]
+    n_envs  = foot_pos.shape[0]
+    stage   = omni.usd.get_context().get_stage()
+
+    # -- future-step spheres --------------------------------------------------
+    for i in range(n_envs):
+        path = f"/World/debug/future_step_{i}"
+        if not stage.GetPrimAtPath(path):
+            sph = UsdGeom.Sphere.Define(stage, path)
+            sph.GetRadiusAttr().Set(0.02)
+            sph.CreateDisplayColorAttr().Set([Gf.Vec3f(*color_step)])
+        else:
+            sph = UsdGeom.Sphere(stage.GetPrimAtPath(path))
+        UsdGeom.XformCommonAPI(sph).SetTranslate(
+            Gf.Vec3d(*foot_pos[i].detach().cpu().tolist())
+        )
+
+    # -- COM spheres ----------------------------------------------------------
+    com_w = amber.data.body_pos_w[:, 3, :]    # (n_envs,3)
+    for i in range(n_envs):
+        path = f"/World/debug/com_sphere_{i}"
+        if not stage.GetPrimAtPath(path):
+            com_sph = UsdGeom.Sphere.Define(stage, path)
+            com_sph.GetRadiusAttr().Set(0.10)
+            com_sph.CreateDisplayColorAttr().Set([Gf.Vec3f(*color_com)])
+        else:
+            com_sph = UsdGeom.Sphere(stage.GetPrimAtPath(path))
+        UsdGeom.XformCommonAPI(com_sph).SetTranslate(
+            Gf.Vec3d(*com_w[i].detach().cpu().tolist())
+        )
+
+
+
 def compute_step_location_local(
     sim_time: float,
     scene,
@@ -209,8 +291,9 @@ def compute_step_location_local(
         compute_step_location_local._orig_foot_y = feet0[:, :, 1].clone()
 
     # always do a fresh LIP‐ICP compute
-    print("doing new lip compute:", sim_time, "; time:", time.time())
-
+    print("------------------------------------------------------------------------------------------------------------")
+    print("_____________________________________________________doing new lip compute:", sim_time, "; time:", time.time())
+    print("------------------------------------------------------------------------------------------------------------")
     # 1) commanded velocity in local frame [N,2]
     cmd_np  = np.array(args_cli.desired_vel, dtype=np.float32)
     command = torch.from_numpy(cmd_np[:2]).to(device).unsqueeze(0).repeat(n_envs, 1)
@@ -470,6 +553,9 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
     foot_r_init       = None
     com_init          = None   # world‐frame COM at start
     q_guess           = ca.DM([0.,0.,0.,0.])
+    next_foot = torch.empty((n_envs, 3), device=device)    # will be overwritten later
+    foot_w_stack  = None                            # empty
+
 
     try:
         while simulation_app.is_running():
@@ -492,6 +578,8 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 sim.step()
                 scene.update(sim_dt)
                 print("[INFO]: Resetting all robots state...")
+                warmup_done=False
+
 
             # ────────────── Policy (or tuning) at lower frequency ─────────────────
             if count % policy_rate == 0:
@@ -563,11 +651,12 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                     sim_time=   sim_time,
                     scene=      scene,
                     args_cli=   args_cli,
-                    nom_height= 1.38,
+                    nom_height= 1.3,
                     Tswing=     PERIOD/2.0,
                     wdes=       WDES,
-                    visualize=  True
+                    visualize=  False
                 )
+                # print("-----------------------------",next_foot)
                 # Capture initial foot & COM positions
                 # Capture initial foot & COM positions
                 pos_world   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
@@ -578,8 +667,10 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 swing_left_flag = float(next_foot[0,1].cpu()) < com_init[1]
                 if swing_left_flag:
                     print("left ", foot_l_init, next_foot)
+                    foot_z=foot_l_init[2]
                 else:
                     print("right", foot_r_init, next_foot)
+                    foot_z=foot_r_init[2]
 
                 # Bézier parameters
                 T       = PERIOD / 2.0                     # half-cycle
@@ -594,8 +685,8 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                     return z0 + (z1 - z0) * (tau**3 + 3 * tau**2 * (1 - tau))
 
                 mask   = phase_np <= 0.5
-                z0_arr = cubic_bezier_interpolation(0,        Swing_ht, 2 * phase)
-                z1_arr = cubic_bezier_interpolation(Swing_ht, 0,        2 * phase - 1)
+                z0_arr = cubic_bezier_interpolation(foot_z,        Swing_ht, 2 * phase)
+                z1_arr = cubic_bezier_interpolation(Swing_ht, 0.03,        2 * phase - 1)
                 z_array = ca.if_else(mask, z0_arr, z1_arr)       # DM(N,1)
 
                 # ────────────────────────────────────────────────────────────────────
@@ -658,17 +749,43 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 phase  = ca.DM((buffer_idx + 1) / N)
                 com_x  = amber.data.body_pos_w.cpu().numpy()[0, 3, 0]
                 com_y  = amber.data.body_pos_w.cpu().numpy()[0, 3, 1]
+                # com_z  = amber.data.body_com_pos_w.cpu().numpy()[0, 3, 2]   # NEW
                 com_z  = amber.data.body_pos_w.cpu().numpy()[0, 3, 2]   # NEW
+                # print(f"Qguess:{q_guess}")
+                # q_guess =ca.DM([0.0,0.0,0.0,0.0])
+                q1_lim = 70      # ±70° → ±1.22173 rad
+                q2_lim = 85      # ±90° → ±1.57080 rad
+
+                # convert DM → NumPy for element-wise test
+                q_np = np.array(q_guess).astype(float)
+
+                # indices: 0 and 2 are q1 (hips) ; 1 and 3 are q2 (knees)
+                for i in (0, 2):                               # q1 joints
+                    if abs(q_np[i]) > q1_lim:
+                        q_np[i] = 0.0
+                for i in (1, 3):                               # q2 joints
+                    if abs(q_np[i]) > q2_lim:
+                        q_np[i] = 0.0
+
+                # back to CasADi DM
+                q_guess = ca.DM(q_np)
 
                 # IK solve (new signature: no z_swing, but needs com_z)
                 q_cas, _ = reference_step(
                     phase, foot_w, com_x, com_y, com_z, q_guess
                 )
                 q_guess = q_cas
+                pos_world_1   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
+                B           = pos_world.shape[0]
+                foot_l_init_curr = pos_world_1[B-2].copy()
+                foot_r_init_curr = pos_world_1[B-1].copy()
                 if debug:
-                    print(f"x:{com_x}; y:{com_y}; z_com:{com_z}; footpos:{foot_w}; IK angles:{q_cas}")
-                    for eid in range(amber.data.joint_pos.shape[0]):
-                        debug_print_joints(amber, env_id=eid)
+                    # print(f"x:{com_x}; y:{com_y}; z_com:{com_z}; IK angles:{q_cas}")
+                    print(f"footpos for IK:{foot_w}")
+                    print(f"------------------------------Curr left foot:{foot_l_init_curr}; right foot:{foot_r_init_curr}")
+                    # print(f"Body com:{amber.data.root_com_pos_w.cpu().numpy()[0] }")
+                    # for eid in range(amber.data.joint_pos.shape[0]):
+                    #     debug_print_joints(amber, env_id=eid)
                 # Scatter into full joint‐target
                 default_all   = amber.data.default_joint_pos.clone().cpu().numpy()
                 joint_targets = default_all.copy()
@@ -683,6 +800,9 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 )
                 # print("time for IK sovle:",time.time()-t_buff_start)
                 # print(f"IK for {buffer_idx}/{N}")
+                draw_step_and_com(scene, next_foot)
+                draw_foot_trajectory(scene, foot_w_stack)
+
                 buffer_idx += 1
             if not warmup_done and buffer_idx >= N:
                 warmup_done = True
@@ -718,6 +838,8 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 sim.step()
                 scene.update(sim_dt)
                 last_reset_step[to_reset] = count
+                warmup_done=False
+                # print("--------------------Contact-----------------------")
             # ───────────────────────── Physics step ────────────────────────────────
             sim.step()
             scene.update(sim_dt)

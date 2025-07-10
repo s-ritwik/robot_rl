@@ -23,17 +23,17 @@ foot_w  = ca.DM([
      0.2,             # Lz
      0.0              # Rz
 ])
-foot_w  = ca.DM([
-    0.,     # Lx
-    0.,     # Rx
-    -0.0968508,       # Ly
-     0.100716,        # Ry
-     0.0,             # Lz
-     0.0              # Rz
-])
+# foot_w  = ca.DM([
+#     0.,     # Lx
+#     0.,     # Rx
+#     -0.0968508,       # Ly
+#      0.100716,        # Ry
+#      0.0,             # Lz
+#      0.0              # Rz
+# ])
 com_x   = 0#3.552713678800501e-15
 com_y   = 0#5.05611404187088e-24
-com_z   = 1.6963213682174683
+com_z   = 1.3963213682174683
 
 # current joint guess (4×1)   – here just zeros
 q_cur   = ca.DM.zeros(4, 1)

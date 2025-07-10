@@ -157,16 +157,16 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # self.rewards.feet_clearance.weight = -20.0
         # self.rewards.phase_contact.weight = 0.25
 
-       # big penalty on fall (pelvis contact)
+       # big penalty on fall (torso contact)
         self.rewards.termination_penalty.weight           = -200.0  
         # reward forward x‐velocity tracking
         self.rewards.track_lin_vel_xy.weight              =  20#80.0  
         # penalize asymmetric joints per cycle
-        self.rewards.joint_symmetry_reward.weight        =  2#
+        self.rewards.joint_symmetry_reward.weight        =  0#2#
         # self.rewards.joint_symmetry_reward.params["diff_threshold"] = 5
         self.rewards.joint_symmetry_reward.params["debug"] = False
         # penalize asymmetric joints per cycle
-        self.rewards.stride_consistency.weight        =  10#
+        self.rewards.stride_consistency.weight        =  4#10#
         # self.rewards.joint_symmetry_reward.params["diff_threshold"] = 5
         self.rewards.stride_consistency.params["debug"] = False
         # Reward phase based contacts: stance and wing
@@ -178,7 +178,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # reward maintaining torso upright within window, penalize beyond threshold
         self.rewards.torso_orientation.weight             =    0.2#2.0  
         # reward alternating foot contacts vs repeats
-        self.rewards.alternation_contact.weight           =   0.2
+        self.rewards.alternation_contact.weight           =   2
         # reward progressive foot placement per cycle
         self.rewards.progressive_step.weight              =    .2#15.0  
         # per‐cycle foot‐contact correctness (+5 for exactly one each, else penalty)

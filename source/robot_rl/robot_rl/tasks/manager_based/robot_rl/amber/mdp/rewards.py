@@ -131,6 +131,30 @@ def feet_slide(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg = Scen
     reward = torch.sum(torch.sum(body_vel**2, dim=-1) * contacts, dim=1)
     return reward
 
+
+def print_foot_positions(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """
+    Event function that prints left & right foot positions for each selected env.
+    Returns a zero‐tensor (shape = [len(env_ids)]) so it satisfies the EventTerm API.
+    """
+    asset = env.scene[asset_cfg.name]
+    # body_pos_w: [N_envs, N_bodies, 3]
+    pos = asset.data.body_pos_w
+    B   = pos.shape[1]
+    # convention: B-2 = right foot, B-1 = left foot
+    right = pos[env_ids, B-2, :].cpu().numpy()
+    left  = pos[env_ids, B-1, :].cpu().numpy()
+
+    # print out each
+    for idx, e in enumerate(env_ids.tolist()):
+        print(f"[Env {e}] left_foot={left[idx]}, right_foot={right[idx]}")
+
+    # return dummy zeros
+    return torch.zeros(env_ids.shape[0], device=pos.device)
 #def phase_feet_contacts(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, period: float) -> torch.Tensor:
 #     """Reward feet in contact with the ground in the correct phase."""
 #     # If the feet are in contact at the right time then positive reward, else 0 reward
@@ -1725,6 +1749,73 @@ def rcs_phase_reward_no_pos(
 
     return reward
 
+from .observations import future_foot_targets_lip, current_foot_positions
+
+# in robot_rl/tasks/manager_based/robot_rl/amber/mdp.py
+def rcs_phase_reward(
+    env: ManagerBasedRLEnv,
+    Ts: float                    = 0.4,      # single‐step duration
+    left_sensor_name: str        = "contact_forces_left",
+    right_sensor_name: str       = "contact_forces_right",
+    force_thresh: float          = 1.0,
+    sigma: float                 = 0.1,      # placement penalty “spread”
+    asset_cfg: SceneEntityCfg    = SceneEntityCfg("robot"),
+    debug: bool                  = False,
+) -> torch.Tensor:
+    """
+    r_cs = 9 · (I_R − I_L) · φ_contact · exp(−‖p̂−p‖² / σ)
+    using only the x,y components of:
+      • p (actual) ← current_foot_positions(env)
+      • p̂ (desired) ← future_foot_targets_lip(env)
+    """
+
+    N, dev = env.num_envs, env.device
+    t      = env.sim.current_time
+
+    # 1) phase‐contact scalar
+    phi_cycle = (t % (2*Ts)) / (2*Ts)             # [0,1)
+    phi_c     = _phi_contact_scalar(phi_cycle)   # your existing helper
+
+    # 2) contact booleans
+    def contact(name):
+        fh = env.scene.sensors[name].data.net_forces_w_history
+        # collapse over history & bodies → [N]
+        return (fh.norm(dim=-1).max(dim=1)[0].max(dim=1)[0] > force_thresh).float()
+
+    I_L = contact(left_sensor_name)   # [N]
+    I_R = contact(right_sensor_name)  # [N]
+
+    # 3) get actual & desired footholds via your obs‐fns
+    #    both return [N,6] = [Lx,Ly,Lz,  Rx,Ry,Rz]
+    future = future_foot_targets_lip(env)  # [N,6]
+    # print(future)
+    current= current_foot_positions(env)   # [N,6]
+
+    # split into left/right, take [:, :2] = x,y
+    p_hat_L = future[:, 0:2]
+    p_hat_R = future[:, 3:5]
+    p_act_L = current[:, 0:2]
+    p_act_R = current[:, 3:5]
+
+    # 4) select the stance foot’s x,y per env
+    #    if left foot is in contact (I_L=1), use L; if right contact (I_R=1), use R
+    #    (if both or neither contact, this will average them, but usually exactly one is 1)
+    p_hat = I_L.unsqueeze(1)*p_hat_L + I_R.unsqueeze(1)*p_hat_R  # [N,2]
+    p_act = I_L.unsqueeze(1)*p_act_L + I_R.unsqueeze(1)*p_act_R  # [N,2]
+
+    # 5) placement‐error penalty
+    sq_err  = (p_hat - p_act).pow(2).sum(dim=1)  # [N]
+    penalty = torch.exp(-sq_err / sigma)        # [N]
+
+    # 6) assemble final reward
+    reward = 9.0 * (I_R - I_L) * phi_c * penalty  # [N]
+
+    if debug and N>0:
+        print(f"[t={t:.3f}] φ={phi_c:+.3f} I_L={I_L[0]:.0f} I_R={I_R[0]:.0f}"
+              f" err={sq_err[0]:.4f} pen={penalty[0]:.3f} r0={reward[0]:+.3f}")
+
+    return reward
+
 ## Critic
 
 def base_lin_vel_amber(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -1926,7 +2017,7 @@ def compute_step_location_local_amber(
 ) -> torch.Tensor:
     asset = env.scene[asset_cfg.name]
     contact_sensor = env.scene.sensors[sensor_cfg.name]
-
+    # print("OK")
     # 1) commanded velocity in local frame
     command = env.command_manager.get_command(command_name)
 
