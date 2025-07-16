@@ -75,8 +75,11 @@ def compute_step_location_local(
     command = torch.from_numpy(cmd_np[:2]).to(device).unsqueeze(0).repeat(n_envs, 1)
 
     # 2) COM position in world from body index 3 [N,3]
-    r = amber.data.body_pos_w[:, 3, :]
-
+    # r = amber.data.body_pos_w[:, 3, :]
+    r = (13*amber.data.body_com_pos_w[:, 3, :]+3.4261*amber.data.body_com_pos_w[:, 4, :]
+        +1.1526*amber.data.body_com_pos_w[:, 5, :]+3.4261*amber.data.body_com_pos_w[:, 6, :]
+        +1.1526*amber.data.body_com_pos_w[:, 7, :] )/(13+2*3.4261+2*1.1526
+    )
     # 3) build ICP base
     omega = math.sqrt(9.81 / nom_height)
     icp_0 = torch.zeros((n_envs, 3), device=device)
@@ -172,6 +175,32 @@ def compute_step_location_local(
     return p
 
 
+def debug_plot_and_print(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    Ts: float,
+    nom_height: float,
+    wdes: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    debug: bool,
+    visualize: bool,
+) -> torch.Tensor:
+    # call your obs fn with visualize=True → draws spheres if a USD stage exists
+    _ = desired_foot_targets_obs(
+        env,
+        Ts=Ts,
+        nom_height=nom_height,
+        wdes=wdes,
+        command_name=command_name,
+        asset_cfg=asset_cfg,
+        debug=debug,
+        visualize=visualize,
+    )
+    # return dummy zeros so the EventTerm API is happy
+    return torch.zeros(env_ids.shape[0], device=env.device)
+
+
 @torch.no_grad()
 def desired_foot_targets_obs(
     env: ManagerBasedRLEnv,
@@ -220,20 +249,21 @@ def desired_foot_targets_obs(
     changed_mask = sign_tensor != prev_sign
 
     # 2) update only on half‐cycle flips
-    if changed_mask.any():
-        swing = 1 if sign_now > 0 else 0
-        new_steps = compute_step_location_local(
-            sim_time   = t,
-            scene      = env.scene,
-            num_envs   = env.num_envs,
-            desired_vel= env.command_manager.get_command("base_velocity")[0].cpu().tolist(),
-            nom_height = nom_height,
-            Tswing     = Ts,
-            wdes       = wdes,
-            visualize  = False,
-        ) # [N,3]
-        targets[changed_mask, swing, :] = new_steps[changed_mask]
-        prev_sign.copy_(sign_tensor)
+    # if changed_mask.any():
+    swing = 1 if sign_now > 0 else 0
+    new_steps = compute_step_location_local(
+        sim_time   = t,
+        scene      = env.scene,
+        num_envs   = env.num_envs,
+        desired_vel= env.command_manager.get_command("base_velocity")[0].cpu().tolist(),
+        nom_height = nom_height,
+        Tswing     = Ts,
+        wdes       = wdes,
+        visualize  = False,
+    ) # [N,3]
+    # targets[changed_mask, swing, :] = new_steps[changed_mask]
+    targets[:, swing, :] = new_steps
+    prev_sign.copy_(sign_tensor)
 
     # 3) debug print
     if debug and N > 0:
@@ -260,7 +290,10 @@ def desired_foot_targets_obs(
         stage = omni.usd.get_context().get_stage()
 
         # 1) COM as big red sphere
-        com = amber.data.body_pos_w[:, 3, :]  # [N,3]
+        com = (13*amber.data.body_com_pos_w[:, 3, :]+3.4261*amber.data.body_com_pos_w[:, 4, :]
+            +1.1526*amber.data.body_com_pos_w[:, 5, :]+3.4261*amber.data.body_com_pos_w[:, 6, :]
+            +1.1526*amber.data.body_com_pos_w[:, 7, :] )/(13+2*3.4261+2*1.1526
+        )  # [N,3]
         for i in range(N):
             path = f"/World/debug/com_sphere_{i}"
             if not stage.GetPrimAtPath(path):
@@ -316,7 +349,17 @@ def desired_foot_targets_obs(
             UsdGeom.XformCommonAPI(sph).SetTranslate(Gf.Vec3d(*targets[i, 1, :].cpu().tolist()))
         
     # 5) flatten and return
-    return targets.reshape(N, 6)
+    # print(targets.reshape(N, 6))
+    curr_pos = amber.data.body_pos_w[:, asset_cfg.body_ids, :]  # [N,2,3]
+
+    # relative = desired_world − current_world
+    rel_targets = targets - curr_pos                            # [N,2,3]
+    rel_xz      = rel_targets[:, :, [0, 2]]                           # [N,2,2]
+    # print(rel_xz)
+    # reshape to [N,4] in order [ΔLx, ΔLz, ΔRx, ΔRz]
+    return rel_xz.view(N, 4)
+
+
 
 
 

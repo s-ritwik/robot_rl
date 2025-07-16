@@ -179,6 +179,7 @@ def feed_reference_trajectory(sim_time, scene, args_cli, ref_dir="/home/s-ritwik
     # for i, name in enumerate(names):
     #     idx = all_names.index(name)
     #     joint_targets[:, idx] = target_tensor[0, i]
+    feed_reference_trajectory.last_target_np = target_np.copy()
 
     amber.set_joint_position_target(joint_targets)
 
@@ -472,7 +473,13 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_fh = open(csv_path, "w", newline="")
     writer = csv.writer(csv_fh)
-    writer.writerow(["step", "sim_time", "env_id", *amber.data.joint_names])
+    # ------------- CSV HEADER -------------
+    header = (
+        ["step", "sim_time", "env_id"]
+        + list(amber.data.joint_names)           # 7 actual joint angles
+        + ["q1_left_ref", "q2_left_ref", "q1_right_ref", "q2_right_ref"]
+    )
+    writer.writerow(header)
     # Reset setup
     # track last reset step per env
     last_reset_step = torch.full(
@@ -539,9 +546,23 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
 
             feed_reference_trajectory(sim_time, scene, args_cli)
             # ─── Log CSV ───
-            cur_pos = amber.data.joint_pos.cpu().numpy()
+            ref_np = getattr(
+                feed_reference_trajectory,
+                "last_target_np",
+                np.full(4, np.nan, dtype=np.float32)     # safe fallback
+            )
+
+            # -------------------------------------------------------------
+            # write one row per environment
+            # -------------------------------------------------------------
+            cur_pos = amber.data.joint_pos.cpu().numpy()          # (n_envs, 7)
             for env_id in range(n_envs):
-                writer.writerow([count, sim_time, env_id, *cur_pos[env_id]])
+                row = (
+                    [count, sim_time, env_id]
+                    + cur_pos[env_id].tolist()
+                    + ref_np.tolist()
+                )
+                writer.writerow(row)
             if count % 100 == 0:
                 csv_fh.flush()
             

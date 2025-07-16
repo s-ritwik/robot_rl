@@ -102,7 +102,7 @@ class AmberObservationsCfg(ObservationsCfg):
             noise=Unoise(n_min=-0.01, n_max=0.01),
             history_length=1,
         )
-
+        
         # Phase clock
         sin_phase = ObsTerm(func=mdp.sin_phase, params={"period": PERIOD})
         cos_phase = ObsTerm(func=mdp.cos_phase, params={"period": PERIOD})

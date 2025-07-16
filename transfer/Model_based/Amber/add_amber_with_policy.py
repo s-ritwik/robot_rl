@@ -18,11 +18,11 @@ parser.add_argument(
             "action_scale, default_angles, qvel_scale, ang_vel_scale, command_scale",
 )
 parser.add_argument(
-    "--csv_out", type=Path, default=Path("amber_joint_log.csv"),
+    "--csv_out", type=Path, default=Path("transfer/Model_based/amber_joint_log3D.csv"),
     help="Where to write joint‐position logs",
 )
 parser.add_argument(
-    "--desired_vel", type=float, nargs=3, default=[-.2, 0.0, 0.0],
+    "--desired_vel", type=float, nargs=3, default=[-.0, 0.0, 0.0],
     help="Desired base command [vx, vy, vyaw]"
 )
 parser.add_argument(
@@ -65,7 +65,7 @@ from transfer.Model_based.Amber.rl_policy_wrapper import RLPolicy
 from transfer.Model_based.Amber.amber_cfg import NewRobotsSceneCfg
 from transfer.Model_based.Amber.amber_utils import run_simulator
 # from transfer.Model_based.Amber.amber_utils_policy import run_simulator
-
+# from transfer.Model_based.Amber.amber_utils_lip_at_policy_rate import run_simulator
 
 def main():
     

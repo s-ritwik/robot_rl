@@ -48,7 +48,7 @@ ROBOT_ASSETS_AMBER = "/home/s-ritwik/src/robot_rl/robot_assets/amber5/amber"
 
 AMBER_CONFIG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ROBOT_ASSETS_AMBER}/amber_test.usd",
+        usd_path=f"{ROBOT_ASSETS_AMBER}/amber.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -229,7 +229,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             amber_target = default_all + random_offsets
 
             # 5) Send to sim
-            amber.set_joint_position_target(amber_target)
+            # amber.set_joint_position_target(amber_target)
 
             # ─────────────── LOG JOINT POSITIONS ───────────────
             # (n_envs, n_joints) → iterate so each env gets its own CSV row

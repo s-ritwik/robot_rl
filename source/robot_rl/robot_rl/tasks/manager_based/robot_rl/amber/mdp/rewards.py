@@ -1749,7 +1749,6 @@ def rcs_phase_reward_no_pos(
 
     return reward
 
-
 @torch.no_grad()
 def rcs_phase_reward_with_placement(
     env: ManagerBasedRLEnv,
@@ -1758,26 +1757,26 @@ def rcs_phase_reward_with_placement(
     right_sensor_name: str      = "contact_forces_right",
     force_thresh: float         = 1.0,
     sigma: float                = 0.1,
-    nom_height: float           = 0.45,
-    wdes: float                 = 0.1,
     command_name: str           = "base_velocity",
+    # note: asset_cfg only needed for contact flags, not for the obs
     asset_cfg: SceneEntityCfg   = SceneEntityCfg("robot"),
     debug: bool                 = False,
+    visualise: bool             = False,
 ) -> torch.Tensor:
     """
-    r_cs = 9·(I_R − I_L)·φ_contact·exp(−‖p̂−p‖²/σ), 
-    where p̂ ← desired_foot_targets_obs(...) and p ← current_foot_positions(...)
+    Uses the *relative* 4-d ObsTerm [ΔLx,ΔLz,ΔRx,ΔRz] from
+    desired_foot_targets_obs.  No more 6-d slicing!
+    r_cs = 9·(I_R−I_L)·φ_contact·exp(−‖Δx_z‖²/σ)
     """
-
     N, dev = env.num_envs, env.device
     t      = env.sim.current_time
 
-    # 1) φ_contact
-    phi_cycle = (t % (2*Ts)) / (2*Ts)
-    phi_cont  = _phi_contact_scalar(phi_cycle)
+    # 1) φ_contact scalar
+    phi_cycle = (t % (2*Ts)) / (2*Ts)                 # [0,1)
+    phi_cont  = _phi_contact_scalar(phi_cycle)       # float
 
-    # 2) contact flags
-    def contact(name):
+    # 2) contact flags → I_L, I_R in {0,1}
+    def contact(name: str) -> torch.Tensor:
         fh = env.scene.sensors[name].data.net_forces_w_history
         return (
             fh.norm(dim=-1)
@@ -1786,46 +1785,51 @@ def rcs_phase_reward_with_placement(
               > force_thresh
         ).float()
 
-    I_L = contact(left_sensor_name)
-    I_R = contact(right_sensor_name)
+    I_L = contact(left_sensor_name)   # [N]
+    I_R = contact(right_sensor_name)  # [N]
 
-    # 3) get desired & actual footholds
-    future = desired_foot_targets_obs(
+    # 3) pull in your *relative* future targets: [ΔLx, ΔLz, ΔRx, ΔRz]
+    fut_rel = desired_foot_targets_obs(
         env,
         Ts=Ts,
-        nom_height=nom_height,
-        wdes=wdes,
+        nom_height=1.36,      # ignored by this obs‐call (already baked in)
+        wdes=0.0,            # ignore
         command_name=command_name,
         asset_cfg=asset_cfg,
-        debug=False,         # no print inside obs
-        visualize=False,
-    )  # [N,6]
-    current = current_foot_positions(env, asset_cfg=asset_cfg)  # [N,6]
+        debug=False,
+        visualize=visualise,
+    )  # [N,4]
 
-    # 4) slice x,y for left & right
-    p_hat_L = future[:, 0:2]; p_hat_R = future[:, 3:5]
-    p_act_L = current[:, 0:2]; p_act_R = current[:, 3:5]
+    # 4) split into left vs right rel-vectors
+    rel_L = fut_rel[:, 0:2]   # [ΔLx, ΔLz]
+    rel_R = fut_rel[:, 2:4]   # [ΔRx, ΔRz]
 
-    # 5) pick stance‐foot
-    p_hat = I_L.unsqueeze(1)*p_hat_L + I_R.unsqueeze(1)*p_hat_R
-    p_act = I_L.unsqueeze(1)*p_act_L + I_R.unsqueeze(1)*p_act_R
+    # 5) choose the stance‐foot rel-error per env
+    #    if I_L==1 → stance=left → use rel_L, else (I_R==1) use rel_R
+    #    (if both/neither, we just pick rel_R by default)
+    stance_rel = torch.where(
+        I_L.unsqueeze(1) > 0,
+        rel_L,
+        rel_R,
+    )  # [N,2]
 
     # 6) placement penalty
-    sq_err  = (p_hat - p_act).pow(2).sum(dim=1)
-    penalty = torch.exp(-sq_err / sigma)
+    sq_err  = (stance_rel.pow(2)).sum(dim=1)         # [N]
+    penalty = torch.exp(-sq_err / sigma)            # [N]
 
-    # 7) final reward
-    reward = 9.0 * (I_R - I_L) * phi_cont * penalty
+    # 7) assemble final reward
+    reward = 9.0 * (I_R - I_L) * phi_cont * penalty  # [N]
 
-    # 8) debug print for env-0
+    # 8) optional debug
     if debug and N > 0:
-        print(f"[t={t:.3f}] φ={phi_cont:+.3f} "
-              f"I_L={I_L[0]:.0f} I_R={I_R[0]:.0f} "
-              f"p_act={p_act[0].cpu().numpy()} "
-              f"p_hat={p_hat[0].cpu().numpy()} "
-              f"err={sq_err[0]:.4f} pen={penalty[0]:.3f} "
-              f"r0={reward[0]:+.3f}")
-
+        print(
+            f"[t={t:.3f}] φ={phi_cont:+.3f} "
+            f"I_L={I_L[0]:.0f} I_R={I_R[0]:.0f} "
+            f"rel_L={rel_L[0].cpu().numpy()} "
+            f"rel_R={rel_R[0].cpu().numpy()} "
+            f"pen={penalty[0]:.3f} r0={reward[0]:+.3f}"
+        )
+    # print(reward)
     return reward
 
 ## Critic

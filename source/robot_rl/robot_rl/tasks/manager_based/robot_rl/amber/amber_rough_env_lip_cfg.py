@@ -25,6 +25,8 @@ from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
     RewardsCfg,
     EventCfg,
 )
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
 ##
 # Pre-defined configs
 ##
@@ -41,17 +43,18 @@ class AmberRoughLipObsCfg(AmberObservationsCfg):
                 "nom_height":   1.36,
                 "wdes":         0,
                 "command_name": "base_velocity",
-                "asset_cfg":    SceneEntityCfg("robot"),
+                "asset_cfg":    SceneEntityCfg("robot",body_names=["left_shin","right_shin"],),
                 "debug":        False,
-                "visualize":True
+                "visualize":    False
             },
         )
-        current_feet = ObsTerm(
-            func           = mdp.current_foot_positions,
-            history_length = 1,
-            noise          = Unoise(n_min=-0.01, n_max=0.01),
-            scale          = 1.0,   # no extra scaling
-        )
+        # current_feet = ObsTerm(
+        #     func           = mdp.current_foot_positions,
+        #     history_length = 1,
+        #     noise          = Unoise(n_min=-0.01, n_max=0.01),
+        #     scale          = 1.0,   # no extra scaling
+        # )
+        # velocity_commands=None
     @configclass
     class CriticCfg(AmberObservationsCfg.CriticCfg):
         # inherit everything the base critic had...
@@ -62,19 +65,20 @@ class AmberRoughLipObsCfg(AmberObservationsCfg):
             params  = {
                 "Ts":           PERIOD/2.0,
                 "nom_height":   1.36,
-                "wdes":         WDES,
+                "wdes":         0,
                 "command_name": "base_velocity",
-                "asset_cfg":    SceneEntityCfg("robot"),
+                "asset_cfg":    SceneEntityCfg("robot",body_names=["left_shin","right_shin"],),
                 "debug":        False,
+                "visualize":False
             },
         )
-        current_feet = ObsTerm(
-            func=mdp.current_foot_positions,
-            history_length=1,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-            scale=1.0,
-        )
-    
+        # current_feet = ObsTerm(
+        #     func=mdp.current_foot_positions,
+        #     history_length=1,
+        #     noise=Unoise(n_min=-0.01, n_max=0.01),
+        #     scale=1.0,
+        # )
+        # velocity_commands=None
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
 
@@ -103,17 +107,31 @@ class AmberRoughLipRewards(AmberRewardCfg):
     # )
     rcs_phase_with_place = RewTerm(
         func=mdp.rcs_phase_reward_with_placement,
-        weight=4.0,
+        weight=100.0,
         params={
             "Ts":                PERIOD/2,
             "left_sensor_name":  "contact_forces_left",
             "right_sensor_name": "contact_forces_right",
             "force_thresh":      1.0,
             "sigma":             0.05,
-            "asset_cfg":         SceneEntityCfg("robot"),
+            "asset_cfg":         SceneEntityCfg("robot",body_names=["left_shin","right_shin"],),
             "debug":             False,
+            "visualise":         False, 
         },
     )
+    # future_feet = RewTerm(
+    #         func    = mdp.desired_foot_targets_obs,
+    #         weight=20.0,
+    #         params  = {
+    #             "Ts":           PERIOD/2.0,
+    #             "nom_height":   1.36,
+    #             "wdes":         0,
+    #             "command_name": "base_velocity",
+    #             "asset_cfg":    SceneEntityCfg("robot",body_names=["left_shin","right_shin"],),
+    #             "debug":        False,
+    #             "visualize":True
+    #         },
+    #     )
     # lip_feet_tracking = RewTerm(
     #     func=mdp.lip_feet_tracking,
     #     weight=10.0,
@@ -131,20 +149,34 @@ class AmberRoughLipRewards(AmberRewardCfg):
 @configclass
 class AmberRoughLipEventsCfg(AmberEventsCfg):
     # Calculate new step location on a fixed interval
-    update_step_location = EventTerm(func=mdp.compute_step_location_local_amber,
-                                     mode="interval",
-                                     interval_range_s=(PERIOD / 2., PERIOD / 2.),
-                                     is_global_time=False,
-                                     params={
-                                         "nom_height": 1.3,
-                                         "Tswing": PERIOD / 2.,
-                                         "command_name": "base_velocity",
-                                         "wdes": WDES,
-                                         "feet_bodies"  : SceneEntityCfg(
-                                            "robot",
-                                            body_names=["left_shin","right_shin"]
-                                        ),
-                                     })
+    # update_step_location = EventTerm(func=mdp.compute_step_location_local_amber,
+    #                                  mode="interval",
+    #                                  interval_range_s=(PERIOD / 2., PERIOD / 2.),
+    #                                  is_global_time=False,
+    #                                  params={
+    #                                      "nom_height": 1.3,
+    #                                      "Tswing": PERIOD / 2.,
+    #                                      "command_name": "base_velocity",
+    #                                      "wdes": WDES,
+    #                                      "feet_bodies"  : SceneEntityCfg(
+    #                                         "robot",
+    #                                         body_names=["left_shin","right_shin"]
+    #                                     ),
+    #                                  })
+    
+    LIP_plotting = EventTerm(
+        func=mdp.debug_plot_and_print,
+        mode="step",
+        params={
+            "Ts":            PERIOD/2.0,
+            "nom_height":    1.36,
+            "wdes":          0.0,
+            "command_name":  "base_velocity",
+            "asset_cfg":     SceneEntityCfg("robot", body_names=["left_shin","right_shin"]),
+            "debug":         True,
+            "visualize":     True,
+        },
+    )
     # Do on reset
     # reset_update_set_location = EventTerm(func=mdp.compute_step_location_local,
     #                                       mode="reset",
@@ -162,8 +194,8 @@ class AmberRoughLipEventsCfg(AmberEventsCfg):
 class AmberRoughLipEnvCfg(AmberRoughEnvCfg):
     """Configuration for the Amber Flat environment."""
     # events: AmberRoughLipEventsCfg = AmberRoughLipEventsCfg()
-    observations: AmberRoughLipObsCfg = AmberRoughLipObsCfg()
-    # rewards : AmberRoughLipRewards = AmberRoughLipRewards()
+    # observations: AmberRoughLipObsCfg = AmberRoughLipObsCfg()
+    rewards : AmberRoughLipRewards = AmberRoughLipRewards()
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
