@@ -2,7 +2,7 @@ import csv
 import numpy as np
 import torch
 from pxr import Gf, UsdGeom
-from isaaclab.utils.math import subtract_frame_transforms,euler_xyz_from_quat, wrap_to_pi, quat_rotate_inverse, yaw_quat, quat_rotate, quat_inv
+from isaaclab.utils.math import subtract_frame_transforms, euler_xyz_from_quat, wrap_to_pi, quat_rotate_inverse, yaw_quat, quat_rotate, quat_inv
 import omni.usd
 import math,time
 
@@ -26,59 +26,6 @@ def get_projected_gravity(quat: np.ndarray) -> np.ndarray:
     return pg
 
 import math
-
-def pd_tuning_sine(
-    amber,
-    sim_time: float,
-    amplitude: float = 0.5,
-    frequency: float = 0.1,
-    joint_names: list[str] | None = None
-):
-    """
-    Drive a set of joints on a slow sine wave and print ref vs. actual.
-
-    amber       : scene["Amber"] handle
-    sim_time    : current simulation time (s)
-    amplitude   : peak deflection (rad)
-    frequency   : oscillation rate (Hz)
-    joint_names : list of joint names to drive & print;
-                  defaults to the four actuated joints
-    """
-    # default to your 4 actuated joints
-    if joint_names is None:
-        joint_names = ["q1_left", "q2_left", "q1_right", "q2_right"]
-
-    # fetch default & prepare target tensor
-    default = amber.data.default_joint_pos.clone()       # (n_envs, n_joints)
-    target  = default.clone()
-
-    # compute common sine value
-    phase = 2 * math.pi * frequency * sim_time
-    sinv  = amplitude * math.sin(phase)
-
-    names = list(amber.data.joint_names)  # e.g. ["base_tx", ..., "q2_right"]
-
-    # assign to each requested joint
-    for jn in joint_names:
-        if jn in names:
-            idx = names.index(jn)
-            target[:, idx] = sinv
-
-    # send as position target
-    amber.set_joint_position_target(target)
-    
-    # read back actual
-    actual = amber.data.joint_pos.cpu().numpy()         # (n_envs, n_joints)
-
-    # print for each env
-    for eid in range(actual.shape[0]):
-        line = f"[PD_TUNING][env {eid}] t={sim_time:.2f}s"
-        for jn in joint_names:
-            idx = names.index(jn)
-            ref = target[eid, idx].item()
-            act = actual[eid, idx]
-            line += f"  {jn}_ref={ref:.3f} act={act:.3f}"
-        print(line)
 
 
 def debug_print_joints(amber, env_id: int = 0):
@@ -658,130 +605,28 @@ def compute_step_location_local(
 #     return p
 
 
+def quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Apply an inverse quaternion rotation to a vector.
 
-def sinusoid_test(amber, sim_time, amplitude=0.5, frequency=0.5):
+    Args:
+        quat: The quaternion in (w, x, y, z). Shape is (..., 4).
+        vec: The vector in (x, y, z). Shape is (..., 3).
+
+    Returns:
+        The rotated vector in (x, y, z). Shape is (..., 3).
     """
-    Drive q2_left and q2_right joints on a sine wave.
-    
-    amber     : scene["Amber"] handle
-    sim_time  : current simulation time (seconds)
-    amplitude : peak deflection in radians
-    frequency : oscillation rate in Hz
-    """
-    # 1) grab the default joint‐pose tensor (n_envs × n_joints)
-    target = amber.data.default_joint_pos.clone()
-    
-    # 2) compute sine value
-    phase  = 2 * math.pi * frequency * sim_time
-    s      = amplitude * math.sin(phase)
-    
-    # 3) find indices
-    names  = amber.data.joint_names  # list of strings
-    idx_l  = names.index("q2_left")
-    idx_r  = names.index("q2_right")
-    print("angle given:",s)
-    # 4) assign to all envs
-    target[:, idx_l] = s
-    target[:, idx_r] = s
-    
-    # 5) send to sim
-    amber.set_joint_position_target(target)
+    # store shape
+    shape = vec.shape
+    # reshape to (N, 3) for multiplication
+    quat = quat.reshape(-1, 4)
+    vec = vec.reshape(-1, 3)
+    # extract components from quaternions
+    xyz = quat[:, 1:]
+    t = xyz.cross(vec, dim=-1) * 2
+    return (vec - quat[:, 0:1] * t + xyz.cross(t, dim=-1)).view(shape)
 
 
 
-def swing_foot_trajectory(sim, scene, args_cli,
-                          next_foot: torch.Tensor,
-                          sim_dt: float,
-                          swing_height: float = 0.07,
-                          N: int = 100):
-    """
-    Execute one half‐cycle swing from current foot → next_foot in N steps.
-    sim        : isaaclab.sim.SimulationContext
-    scene      : InteractiveScene
-    args_cli   : CLI args (num_envs, desired_vel, etc.)
-    next_foot  : torch.Tensor [n_envs×3] world‐frame target for swing foot
-    sim_dt     : physics dt (seconds)
-    swing_height: max foot lift (meters)
-    N          : # of IK sub‐steps over Tswing = PERIOD/2
-    """
-    amber = scene["Amber"]
-    device = amber.data.default_root_state.device
-
-    # half‐cycle duration
-    Tswing = PERIOD/2.0
-
-    # --- fetch world‐frame arrays (assume n_envs==1 for clarity) ---
-    pos_world = amber.data.body_pos_w.cpu().numpy()[0]   # shape (B,3)
-    B = pos_world.shape[0]
-    foot_l = pos_world[B-2].copy()   # body index B-2 = left foot
-    foot_r = pos_world[B-1].copy()   # body index B-1 = right foot
-    com    = amber.data.body_pos_w.cpu().numpy()[0, 3, :].copy()
-
-    # decide which foot swings
-    swing_left = float(next_foot[0,1].cpu()) < com[1]
-    p0 = foot_l if swing_left else foot_r
-    p1 = next_foot.cpu().numpy()[0].copy()
-
-    # load your CasADi IK solver (same as in amber_casadi_main_cpu.py)
-    global reference_step
-
-    # build index list for your 4 actuated joints
-    names     = list(amber.data.joint_names)
-    actuated  = ["q1_left","q2_left","q1_right","q2_right"]
-    idxs      = [names.index(j) for j in actuated]
-
-    # warm‐start q_prev with the last swing or current sim reading
-    if not hasattr(swing_foot_trajectory, "_q_prev"):
-        q0 = amber.data.joint_pos.cpu().numpy()[0, idxs]
-        swing_foot_trajectory._q_prev = ca.DM(q0.reshape(-1,1))
-    q_prev = swing_foot_trajectory._q_prev
-
-    # cubic Bézier blending
-    def bezier_interp(v0, v1, t):
-        return v0 + (v1 - v0)*(t**3 + 3*(t**2)*(1-t))
-
-    # run the N‐step swing
-    for k in range(N):
-        s = (k+1)/N
-        # interpolate XY by Bézier
-        pXY = bezier_interp(p0[:2], p1[:2], s)
-        # interpolate Z with two‐phase Bézier
-        if s <= 0.5:
-            z = bezier_interp(0.0, swing_height, 2*s)
-        else:
-            z = bezier_interp(swing_height, 0.0, 2*s - 1)
-        p_i = np.array([pXY[0], pXY[1], z], dtype=np.float32)
-
-        # build the 6‐vector foot_world = [left; right]
-        # foot order in reference_step is [left_toe, right_toe]
-        if swing_left:
-            fw_left  = ca.DM(p_i)
-            fw_right = ca.DM(foot_r)
-        else:
-            fw_left  = ca.DM(foot_l)
-            fw_right = ca.DM(p_i)
-        foot_w = ca.vertcat(fw_left, fw_right)
-
-        # phase, COM x/y, swing‐z
-        phase = ca.DM(s)
-        com_x = ca.DM(com[0])
-        com_y = ca.DM(com[1])
-        z_dm  = ca.DM(z)
-
-        # call IK: returns (4×1) q and (6×1) foot_flat (ignored here)
-        q_cas, _ = reference_step(phase, foot_w, com_x, com_y, z_dm, q_prev)
-        q_prev   = q_cas
-        swing_foot_trajectory._q_prev = q_prev
-
-        # scatter that 4‐vector into your full 7‐joint target
-        target = amber.data.default_joint_pos.clone().cpu().numpy()
-        target[0, idxs] = np.array(q_cas).flatten()
-        amber.set_joint_position_target(torch.from_numpy(target).to(device))
-
-        # step the sim
-        # scene.write_data_to_sim()
-        # sim.step()
-        # scene.update(sim_dt)
 
 
 def run_simulator(sim, scene, policy, simulation_app, args_cli):
@@ -908,26 +753,43 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
             # ────────────── Policy (or tuning) at lower frequency ─────────────────
             if count % policy_rate == 0:
                 # Gather sensor data
-                qpos = amber.data.joint_pos.cpu().numpy()[0]
-                qvel = amber.data.joint_vel.cpu().numpy()[0]
-                root = amber.data.body_state_w.cpu().numpy()[0,3] #3 is for 'torso'
-                ori  = root[3:7]
-                quat = np.array([ori[3], ori[0], ori[1], ori[2]], dtype=np.float32)
-                quat = np.array([ori[0], ori[1], ori[2], ori[3]], dtype=np.float32)
-                body_ang_vel = root[10:13].astype(np.float32)
-                des_vel = np.array(args_cli.desired_vel, dtype=np.float32)
+                # ─── Gather sensor data from env 0 ───
+                qpos = amber.data.joint_pos.cpu().numpy()[0] - amber.data.default_joint_pos.cpu().numpy()      # (7,)
+                # print(qpos.shape)
+                qvel = amber.data.joint_vel.cpu().numpy()[0]- amber.data.default_joint_vel .cpu().numpy()    # (7,)
+                root = amber.data.root_state_w.cpu().numpy()[0]   # (13,)
+                # ori  = root[3:7]
+                # quat = np.array([ori[3], ori[0], ori[1], ori[2]], dtype=np.float32)
+                # body_ang_vel = root[10:13].astype(np.float32)     # (3,)
+                # use body-frame (torso) quat, not the fixed root link
+                ori  = amber.data.body_quat_w[0, 3, :].cpu().numpy()   # (4,)  qw,qx,qy,qz
+                quat = np.array([ori[0], ori[1], ori[2], ori[3]], dtype=np.float32)  # same order
 
-                # Build obs & call policy
+                body_ang_vel = amber.data.body_link_ang_vel_w[0, 3, :].cpu().numpy()
+                des_vel = np.array(args_cli.desired_vel, dtype=np.float32)
+                _G_VEC_W = torch.tensor([0.0, 0.0, -1.0])
+                # projected gravity
+                quat  = amber.data.body_link_quat_w[:, 3, :]          # [N,4]  (w,x,y,z) of link 3
+                # ensure gravity vector on correct device & dtype
+                g_vec = _G_VEC_W.to(quat)
+
+                # broadcast g_vec to match envs
+                g = g_vec.expand(quat.shape[0], 3)
+                # rotate into body frame via inverse quaternion
+                g_body = quat_apply_inverse(quat, g).cpu().numpy()       # [N,3]
+                # ─── Build observation & run policy ───
                 obs = policy.create_obs(
-                    qjoints=        qpos,
-                    body_ang_vel=   body_ang_vel,
-                    qvel=           qvel,
-                    time=           sim_time,
-                    projected_gravity=get_projected_gravity(quat),
-                    des_vel=        des_vel,
+                    qjoints=     qpos,
+                    body_ang_vel=body_ang_vel,
+                    qvel=        qvel,
+                    time=        sim.current_time,
+                    # projected_gravity=get_projected_gravity(quat),
+                    projected_gravity=g_body,
+                    des_vel=     des_vel,
                 )
-                # _ = policy.get_action(obs.to(device))
-                action_isaac = policy.action_isaac
+                _ = policy.get_action(obs.to(device))   # updates policy.action_isaac
+                # action_isaac = policy.action_isaac       # (4,)
+                action_isaac = policy.get_action_isaac()
                 # com_init1 =(13*amber.data.body_com_pos_w.cpu().numpy()[:, 3, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 4, :]
                 #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 5, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 6, :]
                 #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 7, :] )/(13+2*3.4261+2*1.1526
