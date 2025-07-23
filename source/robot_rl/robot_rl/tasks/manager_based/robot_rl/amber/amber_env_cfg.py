@@ -157,7 +157,7 @@ class AmberRewardCfg(RewardsCfg):
     # punishes joint angles
     joint_angles = RewTerm(
         func=mdp.track_joint_angles_exp,
-        weight=-4.0,           # <— tune this scalar to control strength
+        weight=-6.0,           # <— tune this scalar to control strength
         params={"std": 0.5,
                 "threshold_deg":2,
                 },  # <— how “wide” your kernel is

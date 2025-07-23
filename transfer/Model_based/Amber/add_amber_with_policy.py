@@ -29,6 +29,14 @@ parser.add_argument(
     "--num_envs", type=int, default=1,
     help="Number of environments to spawn (policy will be applied to env 0 only)."
 )
+parser.add_argument(
+    "--policy", type=int, default=0,nargs="?", const=1,
+    help="Just load up the policy"
+)
+parser.add_argument(
+    "--lip", type=int, default=0,nargs="?", const=1,
+    help="Just load up the policy"
+)
 parser.add_argument("--video", action="store_true", default=False,
                     help="Save a viewport MP4.")
 parser.add_argument("--video_length", type=int, default=2000,
@@ -69,11 +77,17 @@ from isaaclab.scene import InteractiveScene
 if args_cli.video:
     args_cli.enable_cameras = True
     from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file  # :contentReference[oaicite:0]{index=0}
+if args_cli.lip == 1:
+    from transfer.Model_based.Amber.amber_rl_wrapper_lip import RLPolicy
+    from transfer.Model_based.Amber.amber_utils_lip import run_simulator
 
-from transfer.Model_based.Amber.rl_policy_wrapper import RLPolicy
+else:
+    from transfer.Model_based.Amber.amber_rl_wrapper import RLPolicy
+    from transfer.Model_based.Amber.amber_utils import run_simulator
+
 from transfer.Model_based.Amber.amber_cfg import NewRobotsSceneCfg
-from transfer.Model_based.Amber.amber_utils import run_simulator
-from transfer.Model_based.Amber.amber_utils_policy import run_simulator
+# from transfer.Model_based.Amber.amber_utils import run_simulator
+# from transfer.Model_based.Amber.amber_utils_policy import run_simulator
 # from transfer.Model_based.Amber.amber_utils_lip_at_policy_rate import run_simulator
 def _start_video_capture(filename: str, fps: float):
     """

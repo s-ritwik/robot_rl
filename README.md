@@ -112,6 +112,13 @@ observations and actions, and default angles.
 To add an additional robot, the associated robot sim files will need to be added into the `transfer/sim/robots/` folder,
 the `rl_policy_wrapper` will need to be adjusted a bit, and a new `runner` file will need to be made.
 
+### Amber transfer
+
+You can load the Model-based controller for Amber or the any policy that you trained in a seperate isaac env (not manager based) via the following code. Remove --policy to load model-based,add --lip to load a LIP-RL policy, add --use_casadi_ik to use my custum CasADi solver for IK, otherwise it will use Isaac's DifferentialIK (not very accurate, doesnt work for a fast gait)
+```bash
+python -m transfer.Model_based.Amber.add_amber_with_policy  --config_file transfer/Model_based/Amber/amber_config.yaml --num_envs 1 --policy 
+```
+
 ## Code formatting
 
 We have a pre-commit template to automatically format your code.

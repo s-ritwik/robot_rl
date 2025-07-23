@@ -98,7 +98,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # self.events.push_robot = None
         # self.events.push_robot.params["velocity_range"] = {"x": (-1, 1), "y": (-1, 1), "roll": (-0.4, 0.4),
         #                                                    "pitch": (-0.4, 0.4), "yaw": (-0.4, 0.4)}
-        # self.events.add_base_mass.params["asset_cfg"].body_names = ["pelvis_link"]
+        # self.events.add_base_mass.params["asset_cfg"].body_names = ["torso"]
         # self.events.add_base_mass.params["mass_distribution_params"] = (0.8, 1.2)
         # self.events.add_base_mass.params["operation"] = "scale"
         # self.events.randomize_ground_contact_friction.params["static_friction_range"] = (0.1, 1.25)
@@ -122,7 +122,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         ##
         # Commands
         ##
-        self.commands.base_velocity.ranges.lin_vel_x = (-1.5, 0) # 0 - 1
+        self.commands.base_velocity.ranges.lin_vel_x = (-1.5, 1.5) # 0 - 1
         self.commands.base_velocity.ranges.lin_vel_y = (0,0) #(-1.0, 1.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0, 0)
         self.events.add_base_mass = None
@@ -160,9 +160,9 @@ class AmberRoughEnvCfg(AmberEnvCfg):
        # big penalty on fall (torso contact)
         self.rewards.termination_penalty.weight           = -200.0  
         # reward forward x‐velocity tracking
-        self.rewards.track_lin_vel_xy.weight              =  20#80.0  
+        self.rewards.track_lin_vel_xy.weight              =  30#80.0  
         # penalize asymmetric joints per cycle
-        self.rewards.joint_symmetry_reward.weight        =  10#2#
+        self.rewards.joint_symmetry_reward.weight        =  0.5#2#
         # self.rewards.joint_symmetry_reward.params["diff_threshold"] = 5
         self.rewards.joint_symmetry_reward.params["debug"] = False
         # penalize asymmetric joints per cycle
@@ -236,3 +236,5 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # self.rewards.track_heading.weight = 0.                     # Base heading
         # self.rewards.feet_air_time.weight = 0.
         self.events.base_external_force_torque.params["asset_cfg"].body_names = ["torso"]
+        
+        

@@ -258,7 +258,7 @@ class AmberRoughLipEventsCfg(AmberEventsCfg):
 class AmberRoughLipEnvCfg(AmberRoughEnvCfg):
     """Configuration for the Amber Flat environment."""
     # events: AmberRoughLipEventsCfg = AmberRoughLipEventsCfg()
-    # observations: AmberRoughLipObsCfg = AmberRoughLipObsCfg()
+    observations: AmberRoughLipObsCfg = AmberRoughLipObsCfg()
     rewards : AmberRoughLipRewards = AmberRoughLipRewards()
     def __post_init__(self):
         # post init of parent

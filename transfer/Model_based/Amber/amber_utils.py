@@ -631,6 +631,7 @@ def quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
 
 def run_simulator(sim, scene, policy, simulation_app, args_cli):
     sim_dt   = sim.get_physics_dt()            # 0.005s → 200 Hz
+    print("Sim dt:",sim_dt)
     sim_time = 0.0
     count    = 0
     video_active   = getattr(args_cli, "video", False)
@@ -705,9 +706,8 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
     last_reset_step = torch.full((n_envs,), -1_000_000, dtype=torch.int32, device=device)
     COOLDOWN        = 10  # frames
 
-    # ─── Frequency settings ────────────────────────────────────────────────────
-    policy_rate = 4  # every 4 steps → 200/4 = 50 Hz
-    lip_rate    = max(1, int((PERIOD/2.0) / sim_dt))  # half‐cycle interval
+   
+
 
     # ─── Buffers for inline swing trajectory + IK ─────────────────────────────
     N                 = 80
@@ -724,8 +724,25 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
     next_foot = torch.empty((n_envs, 3), device=device)    # will be overwritten later
     foot_w_stack  = None                            # empty
 
+
+    # ─── Frequency settings ────────────────────────────────────────────────────
+    policy_rate = 4  # every 4 steps → 200/4 = 50 Hz
+    lip_rate    = max(1, int((PERIOD/2.0) / sim_dt))  # half‐cycle interval
+    print("Lip rate:",200/lip_rate,"Hz")
+    # number of physics steps in one half-cycle
+    half_steps = int((PERIOD/2.0) / sim_dt)     # e.g. 0.4 / 0.005 = 80
+    lip_rate   = half_steps                     # call LIP & spline gen once per half-cycle
+    print("Lip rate:",200/lip_rate,"Hz")
+
+    ik_rate    = max(1, half_steps // N)        # call IK N times per half-cycle
+    print("IK Rate:",200/ik_rate,"Hz")
+
+    # ────────────────────────────────────────────────────────────────────────
+    q_vals=[0,0,0,0]
     x_array = ca.GenDM_zeros(n_envs,N)
     y_array = ca.GenDM_zeros(n_envs,N)
+    policy_flag = args_cli.policy
+
     try:
         while simulation_app.is_running():
             simulation_app.update()
@@ -751,318 +768,298 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
 
 
             # ────────────── Policy (or tuning) at lower frequency ─────────────────
-            if count % policy_rate == 0:
+            # if count % policy_rate == 0:
                 # Gather sensor data
-                # ─── Gather sensor data from env 0 ───
-                qpos = amber.data.joint_pos.cpu().numpy()[0] - amber.data.default_joint_pos.cpu().numpy()      # (7,)
-                # print(qpos.shape)
-                qvel = amber.data.joint_vel.cpu().numpy()[0]- amber.data.default_joint_vel .cpu().numpy()    # (7,)
-                root = amber.data.root_state_w.cpu().numpy()[0]   # (13,)
-                # ori  = root[3:7]
-                # quat = np.array([ori[3], ori[0], ori[1], ori[2]], dtype=np.float32)
-                # body_ang_vel = root[10:13].astype(np.float32)     # (3,)
-                # use body-frame (torso) quat, not the fixed root link
-                ori  = amber.data.body_quat_w[0, 3, :].cpu().numpy()   # (4,)  qw,qx,qy,qz
-                quat = np.array([ori[0], ori[1], ori[2], ori[3]], dtype=np.float32)  # same order
-
-                body_ang_vel = amber.data.body_link_ang_vel_w[0, 3, :].cpu().numpy()
-                des_vel = np.array(args_cli.desired_vel, dtype=np.float32)
-                _G_VEC_W = torch.tensor([0.0, 0.0, -1.0])
-                # projected gravity
-                quat  = amber.data.body_link_quat_w[:, 3, :]          # [N,4]  (w,x,y,z) of link 3
-                # ensure gravity vector on correct device & dtype
-                g_vec = _G_VEC_W.to(quat)
-
-                # broadcast g_vec to match envs
-                g = g_vec.expand(quat.shape[0], 3)
-                # rotate into body frame via inverse quaternion
-                g_body = quat_apply_inverse(quat, g).cpu().numpy()       # [N,3]
-                # ─── Build observation & run policy ───
-                obs = policy.create_obs(
-                    qjoints=     qpos,
-                    body_ang_vel=body_ang_vel,
-                    qvel=        qvel,
-                    time=        sim.current_time,
-                    # projected_gravity=get_projected_gravity(quat),
-                    projected_gravity=g_body,
-                    des_vel=     des_vel,
-                )
+            qpos = amber.data.joint_pos.cpu().numpy()[0] - amber.data.default_joint_pos.cpu().numpy()      # (7,)
+            qvel = amber.data.joint_vel.cpu().numpy()[0]- amber.data.default_joint_vel .cpu().numpy()    # (7,)
+            ori  = amber.data.body_quat_w[0, 3, :].cpu().numpy()   # (4,)  qw,qx,qy,qz
+            quat = np.array([ori[0], ori[1], ori[2], ori[3]], dtype=np.float32)  # same order
+            body_ang_vel = amber.data.body_link_ang_vel_w[0, 3, :].cpu().numpy()
+            des_vel = np.array(args_cli.desired_vel, dtype=np.float32)
+            _G_VEC_W = torch.tensor([0.0, 0.0, -1.0])
+            # projected gravity
+            quat  = amber.data.body_link_quat_w[:, 3, :]          # [N,4]  (w,x,y,z) of link 3
+            # ensure gravity vector on correct device & dtype
+            g_vec = _G_VEC_W.to(quat)
+            # broadcast g_vec to match envs
+            g = g_vec.expand(quat.shape[0], 3)
+            # rotate into body frame via inverse quaternion
+            g_body = quat_apply_inverse(quat, g).cpu().numpy()       # [N,3]
+            # ─── Build observation & run policy ───
+            obs = policy.create_obs(
+                qjoints=     qpos,
+                body_ang_vel=body_ang_vel,
+                qvel=        qvel,
+                time=        sim.current_time,
+                projected_gravity=g_body,
+                des_vel=     des_vel,
+            )
+            if policy_flag == 1:
                 _ = policy.get_action(obs.to(device))   # updates policy.action_isaac
-                # action_isaac = policy.action_isaac       # (4,)
                 action_isaac = policy.get_action_isaac()
-                # com_init1 =(13*amber.data.body_com_pos_w.cpu().numpy()[:, 3, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 4, :]
-                #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 5, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 6, :]
-                #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 7, :] )/(13+2*3.4261+2*1.1526
-                # )
-                
-                # com_init2= amber.data.body_pos_w.cpu().numpy()[0, 3]
-                # print(f"Torso pos:{com_init2} ; COM pos:{com_init1}")
+                default_all   = amber.data.default_joint_pos.clone()  # (1,7)
+                target_tensor = torch.from_numpy(action_isaac).to(device).unsqueeze(0)  # (1,4)
+                joint_targets = default_all.clone()
 
-                # Convert to joint‐position targets
-                # default_all   = amber.data.default_joint_pos.clone()
-                # tensor4       = torch.from_numpy(action_isaac).to(device).unsqueeze(0)
-                # joint_targets = default_all.clone()
-                # actuated_names = ["q1_left","q1_right","q2_left","q2_right"]
-                # all_names      = list(amber.data.joint_names)
-                # for i, name in enumerate(actuated_names):
-                #     idx = all_names.index(name)
-                #     joint_targets[:, idx] = tensor4[0, i]
-                scene.write_data_to_sim()
+                # scatter into exactly those 4 actuated joints
+                actuated_names = actuated_names = ["q1_left","q1_right","q2_left","q2_right"]
 
-            if not warmup_done and (foot_w_stack is None or buffer_idx >= N):
-                # Capture current foot positions in world
-                pos_world   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
-                B           = pos_world.shape[0]
-                foot_l_init = pos_world[B - 2].copy()                  # left toe link
-                foot_r_init = pos_world[B - 1].copy()                  # right toe link
+                all_names      = list(amber.data.joint_names)
+                # print(all_names)
+                for i, name in enumerate(actuated_names):
+                    idx = all_names.index(name)
+                    joint_targets[:, idx] = target_tensor[0, i]
+                # print(joint_targets)
 
-                # Build a constant foot_w_stack for one half-cycle (T = PERIOD/2)
-                foot_w_stack = ca.DM.zeros(6, N)
-                for i in range(N):
-                    # Row order: Lx Rx Ly Ry Lz Rz
-                    foot_w_stack[0, i] = foot_l_init[0]
-                    foot_w_stack[1, i] = foot_r_init[0]
-                    foot_w_stack[2, i] = foot_l_init[1]
-                    foot_w_stack[3, i] = foot_r_init[1]
-                    # Lz, Rz already zero  → both feet on ground
+                amber.set_joint_position_target(joint_targets)
+            scene.write_data_to_sim()
+            if policy_flag == 0:
+                if not warmup_done and (foot_w_stack is None or buffer_idx >= N):
+                    # Capture current foot positions in world
+                    pos_world   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
+                    B           = pos_world.shape[0]
+                    foot_l_init = pos_world[B - 2].copy()                  # left toe link
+                    foot_r_init = pos_world[B - 1].copy()                  # right toe link
 
-                buffer_idx = 0                       # start reading from column 0
-                print("[BOOT] Warm-up cycle: both feet planted")
-                # IK-follow block below will consume this stack
-                # ───────────────────────────────────────────────────────────────────
-            # ─────────── LIP‐ICP + inline Bézier trajectory every half‐cycle ────────
-            if warmup_done and count % lip_rate == 0:
-                # Compute next foot target
-                next_foot = compute_step_location_local(
-                    sim_time=   sim_time,
-                    scene=      scene,
-                    args_cli=   args_cli,
-                    nom_height= 0.8,
-                    Tswing=     PERIOD/2.0,
-                    wdes=       WDES,
-                    visualize=  False
-                )
-                # print("-----------------------------",next_foot,"-----------")
-                # Capture initial foot & COM positions
-                # Capture initial foot & COM positions
-                pos_world   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
-                B           = pos_world.shape[0]
-                foot_l_init = pos_world[B-2].copy()
-                foot_r_init = pos_world[B-1].copy()
-                # com_init =(13*amber.data.body_com_pos_w.cpu().numpy()[:, 3, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 4, :]
-                #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 5, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 6, :]
-                #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 7, :] )/(13+2*3.4261+2*1.1526
-                # )
-                # com_init= com_init[0]
-                com_init    = pos_world[3].copy()
-                # print("--Foot com pos--",com_init)
-                swing_left_flag = float(next_foot[0,1].cpu()) < com_init[1]
-                if swing_left_flag:
-                    print("--LEFT FOOT IN SWING ", foot_l_init, next_foot)
-                    foot_z=foot_l_init[2]
-                    foot_z_stance=foot_r_init[2]
-                else:
-                    print("-- RIGHT FOOT IN SWING", foot_r_init, next_foot)
-                    foot_z=foot_r_init[2]
-                    foot_z_stance=foot_l_init[2]
+                    # Build a constant foot_w_stack for one half-cycle (T = PERIOD/2)
+                    foot_w_stack = ca.DM.zeros(6, N)
+                    for i in range(N):
+                        # Row order: Lx Rx Ly Ry Lz Rz
+                        foot_w_stack[0, i] = foot_l_init[0]
+                        foot_w_stack[1, i] = foot_r_init[0]
+                        foot_w_stack[2, i] = foot_l_init[1]
+                        foot_w_stack[3, i] = foot_r_init[1]
+                        # Lz, Rz already zero  → both feet on ground
 
-                # Bézier parameters
-                T       = PERIOD / 2.0                     # half-cycle
-                ts_np   = np.linspace(0.0, T, N)           # time vector
-                ts      = ca.DM(ts_np)
-                phase_np = np.clip((ts_np / T - 0.25) * 2.0, 0.0, 1.0)   # ∈ [0,1]
-                phase    = ca.DM(phase_np)
-
-                def cubic_bezier_interpolation(z0, z1, tau):
-                    """scalar or DM → scalar/DM (0≤tau≤1)"""
-                    tau = ca.fmax(0, ca.fmin(1, tau))
-                    return z0 + (z1 - z0) * (tau**3 + 3 * tau**2 * (1 - tau))
-                stance_z = -0.05
-                mask   = phase_np <= 0.5
-                z0_arr = cubic_bezier_interpolation(foot_z,        Swing_ht, 2 * phase)
-                z1_arr = cubic_bezier_interpolation(Swing_ht, stance_z,        2 * phase - 1)
-                z_array = ca.if_else(mask, z0_arr, z1_arr)       # DM(N,1)
-                # z0_arr_s = cubic_bezier_interpolation(foot_z_stance, stance_z, 2 * phase)
-                # z1_arr_s = cubic_bezier_interpolation(stance_z, stance_z, 2 * phase - 1)
-                # z_array_s = ca.if_else(mask, z0_arr_s, z1_arr_s)       # DM(N,1)
-                # ----------------------------------------------
-                # stance-foot vertical trajectory (DM(N,1))
-                # ----------------------------------------------
-                ramp_factors = ca.DM([i/9.0 for i in range(10)]).reshape((10, 1))      # 0 … 1
-                ramp         = foot_z_stance * (1.0 - ramp_factors)                  # DM(10,1)
-
-                press        = -0.03 * ca.DM.ones(N-10, 1)                           # DM(N-10,1)
-
-                z_array_s    = ca.vertcat(ramp, press)
-                # print(f"swing: {z_array};------stance{z_array_s}")
-                # ────────────────────────────────────────────────────────────────────
-                # 3)  COM path (x moves linearly, y const) ───────────────────────────
-                # ────────────────────────────────────────────────────────────────────
-                v_x     = float(args_cli.desired_vel[0])
-                x_array = com_init[0] + v_x * ts                   # DM(N,1)
-                y_array = com_init[1] + ca.DM.zeros(N, 1)
-
-                # ────────────────────────────────────────────────────────────────────
-                # 4)  Build foot_w_stack (6×N) with stance/swing logic ──────────────
-                #     Row indexing: 0=Lx, 1=Rx, 2=Ly, 3=Ry, 4=Lz, 5=Rz
-                # ────────────────────────────────────────────────────────────────────
-                stance_idx = 1 if swing_left_flag else 0   # 0=L, 1=R (for x & y rows)
-                swing_idx  = 0 if swing_left_flag else 1
-                foot_w_stack = ca.DM.zeros(6, N)
-
-                Lx0, Ly0, Lz0 = foot_l_init        # copy for readability
-                Rx0, Ry0, Rz0 = foot_r_init
-
-                # target X of swing foot (final position)  – shift by nominal step
-                swing_dx = next_foot[0,0].cpu().item() - \
-                        (Lx0 if swing_left_flag else Rx0)
-                # print(swing_dx)
-                # print("swing_dx |")
-                for i in range(N):
-                    # stance foot: stays glued
-                    foot_w_stack[stance_idx,   i] = Lx0 if stance_idx == 0 else Rx0
-                    foot_w_stack[stance_idx+2, i] = Ly0 if stance_idx == 0 else Ry0
-                    foot_w_stack[stance_idx+4, i] = z_array_s[i]                               # z=0
-
-                    # swing foot: X interpolation, same Y, Bézier Z
-                    tau = phase[i]
-                    # print("Phase:",tau)
-                    swing_x = (Lx0 if swing_idx == 0 else Rx0) + swing_dx * tau
-                    foot_w_stack[swing_idx,   i] = swing_x
-                    foot_w_stack[swing_idx+2, i] = Ly0 if swing_idx == 0 else Ry0
-                    foot_w_stack[swing_idx+4, i] = z_array[i]
-                # ────────────────────────────────────────────────────────────────────
-                buffer_idx = 0   # reset buffer pointer
-                # print("___________",foot_w_stack[:,0])
-                # print("lx:",foot_w_stack[0,:])
-                # print("rx",foot_w_stack[1,:])
-                # print("lz:",foot_w_stack[4,:])
-                # print("rz:",foot_w_stack[5,:])
-                # print("xl:",foot_w_stack[0,:])
-    
-                # Now `foot_w_stack` (6×N DM) holds at column k the full [Lx, Rx,Ly,Ry,Lz,Rz]
-                # and can be stepped through in your IK‐loop immediately afterward.
-            
-
-            # ─────────────── IK follow for buffered trajectory ────────────────────
-            if foot_w_stack is not None and buffer_idx < N:
-                # Build foot targets for CasADi from the precomputed DM stack
-                t_buff_start = time.time()
-
-                # each column of foot_w_stack is [Lx, Ly, Lz, Rx, Ry, Rz]
-                foot_w = foot_w_stack[:, buffer_idx]
-                # print(foot_w)
-
-                # phase + COM
-                phase  = ca.DM((buffer_idx + 1) / N)
-                com_x_curr  = amber.data.body_pos_w.cpu().numpy()[0, 3, 0]
-                com_y_curr  = amber.data.body_pos_w.cpu().numpy()[0, 3, 1]
-                com_x  = x_array[buffer_idx]
-                com_y  = y_array[buffer_idx]
-                # com_z  = amber.data.body_com_pos_w.cpu().numpy()[0, 3, 2]   # NEW
-                com_z  = amber.data.body_pos_w.cpu().numpy()[0, 3, 2]   # NEW
-                com_z = 1.29
-                # print(f"Qguess:{q_guess}")
-                # q_guess =ca.DM([0.0,0.0,0.0,0.0])
-                q1_lim = 70 * math.pi / 180      # ±70° → ±1.22173 rad
-                q2_lim = 85 * math.pi / 180     # ±90° → ±1.57080 rad
-
-                # convert DM → NumPy for element-wise test
-                q_np = np.array(q_guess).astype(float)
-
-                # indices: 0 and 2 are q1 (hips) ; 1 and 3 are q2 (knees)
-                for i in (0, 2):                               # q1 joints
-                    if abs(q_np[i]) > q1_lim:
-                        q_np[i] = 0.0
-                for i in (1, 3):                               # q2 joints
-                    if abs(q_np[i]) > q2_lim:
-                        q_np[i] = 0.0
-
-                # back to CasADi DM
-                q_guess = ca.DM(q_np)
-                q_guess = [ 0.85542953, -1.3705312 ,  0.85542953 ,-1.3705312 ]
-                if USE_CASADI_IK:
-                    # IK solve (new signature: no z_swing, but needs com_z)
-                    q_cas, _ = reference_step(
-                        phase, foot_w, com_x, com_y, com_z, q_guess
+                    buffer_idx = 0                       # start reading from column 0
+                    print("[BOOT] Warm-up cycle: both feet planted")
+                    # IK-follow block below will consume this stack
+                    # ───────────────────────────────────────────────────────────────────
+                # ─────────── LIP‐ICP + inline Bézier trajectory every half‐cycle ────────
+                if warmup_done and count % lip_rate == 0:
+                    # Compute next foot target
+                    next_foot = compute_step_location_local(
+                        sim_time=   sim_time,
+                        scene=      scene,
+                        args_cli=   args_cli,
+                        nom_height= 0.8,
+                        Tswing=     PERIOD/2.0,
+                        wdes=       WDES,
+                        visualize=  False
                     )
-                    q_guess = q_cas
-                    q_vals   = np.array(q_cas).astype(float).flatten()   # already in rad
+                    # print("-----------------------------",next_foot,"-----------")
+                    # Capture initial foot & COM positions
+                    # Capture initial foot & COM positions
+                    pos_world   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
+                    B           = pos_world.shape[0]
+                    foot_l_init = pos_world[B-2].copy()
+                    foot_r_init = pos_world[B-1].copy()
+                    # com_init =(13*amber.data.body_com_pos_w.cpu().numpy()[:, 3, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 4, :]
+                    #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 5, :]+3.4261*amber.data.body_com_pos_w.cpu().numpy()[:, 6, :]
+                    #     +1.1526*amber.data.body_com_pos_w.cpu().numpy()[:, 7, :] )/(13+2*3.4261+2*1.1526
+                    # )
+                    # com_init= com_init[0]
+                    com_init    = pos_world[3].copy()
+                    # print("--Foot com pos--",com_init)
+                    swing_left_flag = float(next_foot[0,1].cpu()) < com_init[1]
+                    if swing_left_flag:
+                        print("--LEFT FOOT IN SWING ", foot_l_init, next_foot)
+                        foot_z=foot_l_init[2]
+                        foot_z_stance=foot_r_init[2]
+                    else:
+                        print("-- RIGHT FOOT IN SWING", foot_r_init, next_foot)
+                        foot_z=foot_r_init[2]
+                        foot_z_stance=foot_l_init[2]
 
-                else:
-                    # -------- Isaac-Lab Differential IK -----------------------------------
-                    # 1) Pick which foot is EE this half-cycle
-                    ee_body_id = toe_body_id_L if swing_left_flag else toe_body_id_R
-                    ee_jac_id  = ee_body_id - 1 if amber.is_fixed_base else ee_body_id
+                    # Bézier parameters
+                    T       = PERIOD / 2.0                     # half-cycle
+                    ts_np   = np.linspace(0.0, T, N)           # time vector
+                    ts      = ca.DM(ts_np)
+                    phase_np = np.clip((ts_np / T - 0.25) * 2.0, 0.0, 1.0)   # ∈ [0,1]
+                    phase    = ca.DM(phase_np)
 
-                    # 2) Build the pose goal for that foot  (xyz + quaternion)
-                    foot_xyz  = foot_w[0:3] if swing_left_flag else foot_w[3:6]       # DM(3)
-                    goal_pos  = torch.tensor(foot_xyz.full().flatten(), device=device)
-                    goal_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)      # keep upright
-                    diff_goal = torch.cat((goal_pos, goal_quat)).repeat(n_envs, 1)
+                    def cubic_bezier_interpolation(z0, z1, tau):
+                        """scalar or DM → scalar/DM (0≤tau≤1)"""
+                        tau = ca.fmax(0, ca.fmin(1, tau))
+                        return z0 + (z1 - z0) * (tau**3 + 3 * tau**2 * (1 - tau))
+                    stance_z = -0.05
+                    mask   = phase_np <= 0.5
+                    z0_arr = cubic_bezier_interpolation(foot_z,        Swing_ht, 2 * phase)
+                    z1_arr = cubic_bezier_interpolation(Swing_ht, stance_z,        2 * phase - 1)
+                    z_array = ca.if_else(mask, z0_arr, z1_arr)       # DM(N,1)
+                    # z0_arr_s = cubic_bezier_interpolation(foot_z_stance, stance_z, 2 * phase)
+                    # z1_arr_s = cubic_bezier_interpolation(stance_z, stance_z, 2 * phase - 1)
+                    # z_array_s = ca.if_else(mask, z0_arr_s, z1_arr_s)       # DM(N,1)
+                    # ----------------------------------------------
+                    # stance-foot vertical trajectory (DM(N,1))
+                    # ----------------------------------------------
+                    ramp_factors = ca.DM([i/9.0 for i in range(10)]).reshape((10, 1))      # 0 … 1
+                    ramp         = foot_z_stance * (1.0 - ramp_factors)                  # DM(10,1)
 
-                    diff_ik.set_command(diff_goal)
+                    press        = -0.03 * ca.DM.ones(N-10, 1)                           # DM(N-10,1)
 
-                    # 3) Grab sim data
-                    J     = amber.root_physx_view.get_jacobians()[:, ee_jac_id, :, actuated_ids]
-                    q_act = amber.data.joint_pos[:, actuated_ids]
-                    ee_p  = amber.data.body_pos_w[:, ee_body_id]
-                    ee_q  = amber.data.body_quat_w[:, ee_body_id]
-                    root_p, root_q = amber.data.root_pos_w, amber.data.root_quat_w
-                    # transform EE into root frame
-                    ee_pb, ee_qb = subtract_frame_transforms(root_p, root_q, ee_p, ee_q)
+                    z_array_s    = ca.vertcat(ramp, press)
+                    # print(f"swing: {z_array};------stance{z_array_s}")
+                    # ────────────────────────────────────────────────────────────────────
+                    # 3)  COM path (x moves linearly, y const) ───────────────────────────
+                    # ────────────────────────────────────────────────────────────────────
+                    v_x     = float(args_cli.desired_vel[0])
+                    x_array = com_init[0] + v_x * ts                   # DM(N,1)
+                    y_array = com_init[1] + ca.DM.zeros(N, 1)
 
-                    # 4) Run diff-IK → desired joint angles
-                    q_des = diff_ik.compute(ee_pb, ee_qb, J, q_act)    # (N_envs, 4)
+                    # ────────────────────────────────────────────────────────────────────
+                    # 4)  Build foot_w_stack (6×N) with stance/swing logic ──────────────
+                    #     Row indexing: 0=Lx, 1=Rx, 2=Ly, 3=Ry, 4=Lz, 5=Rz
+                    # ────────────────────────────────────────────────────────────────────
+                    stance_idx = 1 if swing_left_flag else 0   # 0=L, 1=R (for x & y rows)
+                    swing_idx  = 0 if swing_left_flag else 1
+                    foot_w_stack = ca.DM.zeros(6, N)
 
-                    # 5) Pack into the same variable names the rest of your code expects
-                    q_vals = ca.DM(q_des[0].cpu().numpy().reshape(-1, 1))   # 4×1 DM in radians
-                # ------------------------------------------------------------------------- #
+                    Lx0, Ly0, Lz0 = foot_l_init        # copy for readability
+                    Rx0, Ry0, Rz0 = foot_r_init
+
+                    # target X of swing foot (final position)  – shift by nominal step
+                    swing_dx = next_foot[0,0].cpu().item() - \
+                            (Lx0 if swing_left_flag else Rx0)
+                    # print(swing_dx)
+                    # print("swing_dx |")
+                    for i in range(N):
+                        # stance foot: stays glued
+                        foot_w_stack[stance_idx,   i] = Lx0 if stance_idx == 0 else Rx0
+                        foot_w_stack[stance_idx+2, i] = Ly0 if stance_idx == 0 else Ry0
+                        foot_w_stack[stance_idx+4, i] = z_array_s[i]                               # z=0
+
+                        # swing foot: X interpolation, same Y, Bézier Z
+                        tau = phase[i]
+                        # print("Phase:",tau)
+                        swing_x = (Lx0 if swing_idx == 0 else Rx0) + swing_dx * tau
+                        foot_w_stack[swing_idx,   i] = swing_x
+                        foot_w_stack[swing_idx+2, i] = Ly0 if swing_idx == 0 else Ry0
+                        foot_w_stack[swing_idx+4, i] = z_array[i]
+                    # ────────────────────────────────────────────────────────────────────
+                    buffer_idx = 0   # reset buffer pointer
+                    # print("___________",foot_w_stack[:,0])
+                    # print("lx:",foot_w_stack[0,:])
+                    # print("rx",foot_w_stack[1,:])
+                    # print("lz:",foot_w_stack[4,:])
+                    # print("rz:",foot_w_stack[5,:])
+                    # print("xl:",foot_w_stack[0,:])
+        
+                    # Now `foot_w_stack` (6×N DM) holds at column k the full [Lx, Rx,Ly,Ry,Lz,Rz]
+                    # and can be stepped through in your IK‐loop immediately afterward.
+                
+
+                # ─────────────── IK follow for buffered trajectory ────────────────────
+                if foot_w_stack is not None and buffer_idx < N and count % ik_rate == 0:
+                    # Build foot targets for CasADi from the precomputed DM stack
+                    t_buff_start = time.time()
+
+                    # each column of foot_w_stack is [Lx, Ly, Lz, Rx, Ry, Rz]
+                    foot_w = foot_w_stack[:, buffer_idx]
+                    # print(foot_w)
+
+                    # phase + COM
+                    phase  = ca.DM((buffer_idx + 1) / N)
+                    com_x_curr  = amber.data.body_pos_w.cpu().numpy()[0, 3, 0]
+                    com_y_curr  = amber.data.body_pos_w.cpu().numpy()[0, 3, 1]
+                    com_x  = x_array[buffer_idx]
+                    com_y  = y_array[buffer_idx]
+                    # com_z  = amber.data.body_com_pos_w.cpu().numpy()[0, 3, 2]   # NEW
+                    com_z  = amber.data.body_pos_w.cpu().numpy()[0, 3, 2]   # NEW
+                    com_z = 1.29
+                    # print(f"Qguess:{q_guess}")
+                    # q_guess =ca.DM([0.0,0.0,0.0,0.0])
+                    q1_lim = 70 * math.pi / 180      # ±70° → ±1.22173 rad
+                    q2_lim = 85 * math.pi / 180     # ±90° → ±1.57080 rad
+
+                    # convert DM → NumPy for element-wise test
+                    q_np = np.array(q_guess).astype(float)
+
+                    # indices: 0 and 2 are q1 (hips) ; 1 and 3 are q2 (knees)
+                    for i in (0, 2):                               # q1 joints
+                        if abs(q_np[i]) > q1_lim:
+                            q_np[i] = 0.0
+                    for i in (1, 3):                               # q2 joints
+                        if abs(q_np[i]) > q2_lim:
+                            q_np[i] = 0.0
+
+                    # back to CasADi DM
+                    q_guess = ca.DM(q_np)
+                    q_guess = [ 0.85542953, -1.3705312 ,  0.85542953 ,-1.3705312 ]
+                    if USE_CASADI_IK:
+                        # IK solve (new signature: no z_swing, but needs com_z)
+                        q_cas, _ = reference_step(
+                            phase, foot_w, com_x, com_y, com_z, q_guess
+                        )
+                        q_guess = q_cas
+                        q_vals   = np.array(q_cas).astype(float).flatten()   # already in rad
+
+                    else:
+                        # -------- Isaac-Lab Differential IK -----------------------------------
+                        # 1) Pick which foot is EE this half-cycle
+                        ee_body_id = toe_body_id_L if swing_left_flag else toe_body_id_R
+                        ee_jac_id  = ee_body_id - 1 if amber.is_fixed_base else ee_body_id
+
+                        # 2) Build the pose goal for that foot  (xyz + quaternion)
+                        foot_xyz  = foot_w[0:3] if swing_left_flag else foot_w[3:6]       # DM(3)
+                        goal_pos  = torch.tensor(foot_xyz.full().flatten(), device=device)
+                        goal_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)      # keep upright
+                        diff_goal = torch.cat((goal_pos, goal_quat)).repeat(n_envs, 1)
+
+                        diff_ik.set_command(diff_goal)
+
+                        # 3) Grab sim data
+                        J     = amber.root_physx_view.get_jacobians()[:, ee_jac_id, :, actuated_ids]
+                        q_act = amber.data.joint_pos[:, actuated_ids]
+                        ee_p  = amber.data.body_pos_w[:, ee_body_id]
+                        ee_q  = amber.data.body_quat_w[:, ee_body_id]
+                        root_p, root_q = amber.data.root_pos_w, amber.data.root_quat_w
+                        # transform EE into root frame
+                        ee_pb, ee_qb = subtract_frame_transforms(root_p, root_q, ee_p, ee_q)
+
+                        # 4) Run diff-IK → desired joint angles
+                        q_des = diff_ik.compute(ee_pb, ee_qb, J, q_act)    # (N_envs, 4)
+
+                        # 5) Pack into the same variable names the rest of your code expects
+                        q_vals = ca.DM(q_des[0].cpu().numpy().reshape(-1, 1))   # 4×1 DM in radians
+                    # ------------------------------------------------------------------------- #
 
 
-                pos_world_1   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
-                B           = pos_world.shape[0]
-                foot_l_init_curr = pos_world_1[B-2].copy()
-                foot_r_init_curr = pos_world_1[B-1].copy()
-                if debug:
-                    #       ------------------------------------------------------------------------
-                    print(f"COM USING INTERPOLATION||x:{com_x}; y:{com_y}; z_com:{amber.data.body_pos_w.cpu().numpy()[0, 3, 2]}||; |IK angles:{q_cas*180/math.pi}|")
-                    print(f"CURRENT COM POSITIONS :||x:{com_x_curr:.4f}; y:{com_y_curr:.4f}; z_com:{com_z}||; ")
-                    # print((13*amber.data.body_com_pos_w[:, 3, :]+3.4261*amber.data.body_com_pos_w[:, 4, :]
-                    #     +1.1526*amber.data.body_com_pos_w[:, 5, :]+3.4261*amber.data.body_com_pos_w[:, 6, :]
-                    #     +1.1526*amber.data.body_com_pos_w[:, 7, :] )/(13+2*3.4261+2*1.1526
-                    # ))
-                    print(f"footpos for IK:|{foot_w}|")
-                    print(f"------------------------------Curr left foot:|{foot_l_init_curr}|; right foot:|{foot_r_init_curr}|")
-                    # print(f"Body com:{amber.data.root_com_pos_w.cpu().numpy()[0] }")
-                    for eid in range(amber.data.joint_pos.shape[0]):
-                        debug_print_joints(amber, env_id=eid)
-                # Scatter into full joint‐target
-                # default_all   = amber.data.default_joint_pos.clone().cpu().numpy()
-                # joint_targets = default_all.copy()
-                names = list(amber.data.joint_names)
-                # q_rad = (np.array(q_cas).astype(float))   # ← NEW
-                # for i, jn in enumerate(["q1_left","q2_left","q1_right","q2_right"]):
-                #     idx = names.index(jn)
-                #     joint_targets[0, idx] = float(q_rad[i])
+                    pos_world_1   = amber.data.body_pos_w.cpu().numpy()[0]   # (B,3)
+                    B           = pos_world.shape[0]
+                    foot_l_init_curr = pos_world_1[B-2].copy()
+                    foot_r_init_curr = pos_world_1[B-1].copy()
+                    if debug:
+                        #       ------------------------------------------------------------------------
+                        print(f"COM USING INTERPOLATION||x:{com_x}; y:{com_y}; z_com:{amber.data.body_pos_w.cpu().numpy()[0, 3, 2]}||; |IK angles:{q_cas*180/math.pi}|")
+                        print(f"CURRENT COM POSITIONS :||x:{com_x_curr:.4f}; y:{com_y_curr:.4f}; z_com:{com_z}||; ")
+                        # print((13*amber.data.body_com_pos_w[:, 3, :]+3.4261*amber.data.body_com_pos_w[:, 4, :]
+                        #     +1.1526*amber.data.body_com_pos_w[:, 5, :]+3.4261*amber.data.body_com_pos_w[:, 6, :]
+                        #     +1.1526*amber.data.body_com_pos_w[:, 7, :] )/(13+2*3.4261+2*1.1526
+                        # ))
+                        print(f"footpos for IK:|{foot_w}|")
+                        print(f"------------------------------Curr left foot:|{foot_l_init_curr}|; right foot:|{foot_r_init_curr}|")
+                        # print(f"Body com:{amber.data.root_com_pos_w.cpu().numpy()[0] }")
+                        for eid in range(amber.data.joint_pos.shape[0]):
+                            debug_print_joints(amber, env_id=eid)
 
-                # amber.set_joint_position_target(
-                #     torch.from_numpy(joint_targets).to(device)
-                # )
-                joint_targets = amber.data.default_joint_pos.clone().cpu().numpy()
-                for i, jn in enumerate(["q1_left","q2_left","q1_right","q2_right"]):
-                    joint_targets[0, names.index(jn)] = q_vals[i]
+                    # Scatter into full joint‐target
+                    # joint_targets = default_all.copy()
+                    names = list(amber.data.joint_names)
+                    joint_targets = amber.data.default_joint_pos.clone().cpu().numpy()
+                    for i, jn in enumerate(["q1_left","q2_left","q1_right","q2_right"]):
+                        joint_targets[0, names.index(jn)] = q_vals[i]
 
-                amber.set_joint_position_target(torch.from_numpy(joint_targets).to(device))
-                print("time for IK sovle:",time.time()-t_buff_start)
-                print(f"IK for {buffer_idx}/{N}")
-                draw_step_and_com(scene, next_foot)
-                draw_foot_trajectory(scene, foot_w_stack)
+                    amber.set_joint_position_target(torch.from_numpy(joint_targets).to(device))
+                    # print("time for IK sovle:",time.time()-t_buff_start)
+                    # print(f"IK for {buffer_idx}/{N}")
+                    draw_step_and_com(scene, next_foot)
+                    draw_foot_trajectory(scene, foot_w_stack)
 
-                buffer_idx += 1
-            if not warmup_done and buffer_idx >= N:
-                warmup_done = True
-                print("[BOOT] Warm-up finished → switching to LIP planner")
+                    buffer_idx += 1
+                if not warmup_done and buffer_idx >= N:
+                    warmup_done = True
+                    print("[BOOT] Warm-up finished → switching to LIP planner")
             # ───────────────────────────────────────────────────────────────────
             # ─────────────────────────── Logging ──────────────────────────────────
             cur_q = amber.data.joint_pos.cpu().numpy()            # (n_envs, n_joints)
@@ -1081,9 +1078,14 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 foot_r = bodies[env_id, -1, :].tolist()
                 # 4) COM: use body_com_pos_w at index 3 (torso)
                 com = amber.data.body_com_pos_w.cpu().numpy()[env_id, 3, :].tolist()
-                fw = np.array(foot_w).astype(float).flatten()  # length 6
-                tgt_l = [fw[0], fw[2], fw[4]]
-                tgt_r = [fw[1], fw[3], fw[5]]
+                if policy_flag == 1:
+                    fw= [0,0,0,0,0,0]
+                    tgt_l = [0,0,0]
+                    tgt_r = [0,0,0]
+                else:
+                    fw = np.array(foot_w).astype(float).flatten()  # length 6
+                    tgt_l = [fw[0], fw[2], fw[4]]
+                    tgt_r = [fw[1], fw[3], fw[5]]
 
                 # current foot positions from sim:
                 bodies = amber.data.body_pos_w.cpu().numpy()  # shape (n_envs, n_bodies, 3)
@@ -1125,7 +1127,6 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                 sim.step()
                 scene.update(sim_dt)
                 last_reset_step[to_reset] = count
-                
                 # print("--------------------Contact-----------------------")
             # ───────────────────────── Physics step ────────────────────────────────
             sim.step()
@@ -1144,7 +1145,9 @@ def run_simulator(sim, scene, policy, simulation_app, args_cli):
                     capture_viewport_to_file(vp, str(frame_dir / f"frame_{count:06d}.png"))
                 elif count == max_frames:
                     print("[INFO] Reached --video_length; stopping frame capture.")
+            # sim_time = sim.current_time
             sim_time += sim_dt
+
             count   += 1
             
     except KeyboardInterrupt:
