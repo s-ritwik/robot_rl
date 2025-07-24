@@ -82,8 +82,9 @@ class CommandsCfg:
     # )
     base_velocity = mdp.LoopVelocityCommandCfg(
         asset_name="robot",
-        sequence=[0.0, -0.5, -1.0, -1.2, -0.7],    # your custom cycle
-        resampling_time_range=(3.0, 3.0),          # 3 seconds per value
+        sequence=[-0.1, -0.5, -1.0, -1.2, -0.7],    # your custom cycle
+        resampling_time_range=(5.0, 5.0),          # 3 seconds per value
+        debug_vis=True,
     )
 
 @configclass

@@ -126,7 +126,7 @@ python -m transfer.Model_based.Amber.add_amber_with_policy  --config_file transf
   is updated to latch on to the torso of Amber
   - Use 
   ```bash 
-  play_and_plot.py 
+  scripts/rsl_rl/play_and_plot.py 
   ``` 
   for logging all the reward and observations for future plotting. (if you want a custom velocity generator which would give constant commands to compare models, uncomment "command cfg" in amber_env_cfg)
 

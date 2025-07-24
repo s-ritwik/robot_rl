@@ -207,7 +207,7 @@ class AmberRoughEnvCfg(AmberEnvCfg):
         # reward maintaining torso upright within window, penalize beyond threshold
         self.rewards.torso_orientation.weight             =    4#2.0  
         # reward alternating foot contacts vs repeats
-        self.rewards.alternation_contact.weight           =   4
+        self.rewards.alternation_contact.weight           =   10
         # reward progressive foot placement per cycle
         self.rewards.progressive_step.weight              =    3#15.0  
         # per‐cycle foot‐contact correctness (+5 for exactly one each, else penalty)

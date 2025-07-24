@@ -2,7 +2,7 @@ close all;  clc;clear;
 
 % 1. Load the log as a table (keeps headers)
 % T = readtable('model_data/2025-07-20_00-01-48_33349.csv');   % first column must be 'step'
-T = readtable('model_data/2025-07-22_17-26-18_5000_13.csv');   % first column must be 'step'
+T = readtable('model_data/2025-07-22_17-26-18_5000.csv');   % first column must be 'step'
 % T = readtable('model_data/2025-07-09_14-55-53_9999.csv');   % first column must be 'step'
 
 dt   = 0.02;                % sec between physics steps (✓ adjust if needed)
@@ -36,17 +36,17 @@ currVel_lp = lowpass(currVel, Fc, Fs);
 % 4. Plot all three curves
 figure('Name','Velocity-related rewards','NumberTitle','off'); hold on;
 plot(time, currVel,     '-',  'LineWidth',1.3);
-plot(time, cmdVelGiven, '--', 'LineWidth',2.5);
+plot(time, cmdVelGiven, '--', 'LineWidth',2);
 % plot(time, currVel_lp,  '-.', 'LineWidth',1.5);
 grid on;
 
 % 5. Decorations
-xlabel('Time (s)', 'FontSize', 20);
-ylabel('Velocity (m/s)', 'FontSize', 20);
-title('Current vs. Command Velocity (Extra Mass: 0 Kg)', 'FontSize', 20);
-legend({'Current velocity','Command velocity'}, ...
+xlabel('Time (s)');
+ylabel('Reward value');
+title('Current vs. Command Velocity');
+legend({'Current vel','Command velocity'}, ...
        'Interpreter','none','Location','best');set(gca, 'FontSize', 20);
-set(gca, 'FontSize', 20);
+set(gca, 'FontSize', 16);
 avg_err=mean(abs((currVel_lp-cmdVelGiven)./cmdVelGiven))*100
 % fprintf("Avg error:%d ",);
 %% 3D plot
