@@ -129,7 +129,7 @@ onboard:
     - pkg: g1_control
       executable: g1_estimator
       params:
-        opti_track_pos: False
+        opti_track_pos: True
       # callback_groups:
       publishers:
         - ros_parameter: pub_est_setting
@@ -148,6 +148,11 @@ onboard:
           msg_type: ObkIMU
           history_depth: 10
           callback_group: None
+        - ros_parameter: sub_opti_track_pose
+          topic: /g1/pose
+          msg_type: PoseStamped
+          history_depth: 10
+          callback_group: None
       timers:
         - ros_parameter: timer_est_setting
           timer_period_sec: 0.001
@@ -155,49 +160,59 @@ onboard:
   # --------------------------------- #
   # ------------ Sensors ------------ #
   # --------------------------------- #
-  # sensing:
+  sensing:
+  - pkg: g1_control
+    executable: opti_logger
+    # callback_groups:
+    # publishers:
+    subscribers:
+      - ros_parameter: sub_optitrack_pose
+        topic: /g1/pose
+        msg_type: PoseStamped
+        history_depth: 10
+        callback_group: None
   # --------------------------------- #
   # ------------- Robot ------------- #
   # --------------------------------- #
   robot:
-    - is_simulated: False
-      pkg: obelisk_unitree_cpp
-      executable: obelisk_unitree_g1_hardware
-      params:
-        ic_keyframe: standing
-        network_interface_name: enp0s31f6 #enp4s0 # From ifconfig
-        default_kp: [
-          30., 30., 30.,    # L hip
-          30., 30., 30.,    # L knee, ankle
-          30., 30., 30.,    # R hip
-          30., 30., 30.,    # R knee, ankle
-          10.,              # Waist
-          5., 5., 5.,       # L shoulder
-          5., 5., 5., 5.,   # L elbow, wrist
-          5., 5., 5.,       # R shoulder
-          5., 5., 5., 5.,   # R elbow, wrist
-        ]
-        default_kd: [
-          3.,3.,3.,         # L hip
-          3.,3.,3.,         # L knee, ankle
-          3.,3.,3.,         # R hip
-          3.,3.,3.,         # R knee, ankle
-          1.,               # Waist
-          1., 1., 1.,       # L shoulder
-          1., 1., 1., 1.,   # L elbow, wrist
-          1., 1., 1.,       # R shoulder
-          1., 1., 1., 1.,   # R elbow, wrist
-        ]
-        user_pose: [-0.25, 0, 0, 0.46, -0.25, 0,
-                  -0.25, 0, 0, 0.46, -0.25, 0,
-                  0, 0, 0,
-                  0.07, 0.24, 0, 1.39, 0, 0, 0,
-                  0.07, -0.24, 0, 1.39, 0, 0, 0]
-    # - is_simulated: True
-    #   pkg: robot_sim
-    #   executable: simulation
+    # - is_simulated: False
+    #   pkg: obelisk_unitree_cpp
+    #   executable: obelisk_unitree_g1_hardware
     #   params:
     #     ic_keyframe: standing
+    #     network_interface_name: enp0s31f6 #enp4s0 # From ifconfig
+    #     default_kp: [
+    #       30., 30., 30.,    # L hip
+    #       30., 30., 30.,    # L knee, ankle
+    #       30., 30., 30.,    # R hip
+    #       30., 30., 30.,    # R knee, ankle
+    #       10.,              # Waist
+    #       5., 5., 5.,       # L shoulder
+    #       5., 5., 5., 5.,   # L elbow, wrist
+    #       5., 5., 5.,       # R shoulder
+    #       5., 5., 5., 5.,   # R elbow, wrist
+    #     ]
+    #     default_kd: [
+    #       3.,3.,3.,         # L hip
+    #       3.,3.,3.,         # L knee, ankle
+    #       3.,3.,3.,         # R hip
+    #       3.,3.,3.,         # R knee, ankle
+    #       1.,               # Waist
+    #       1., 1., 1.,       # L shoulder
+    #       1., 1., 1., 1.,   # L elbow, wrist
+    #       1., 1., 1.,       # R shoulder
+    #       1., 1., 1., 1.,   # R elbow, wrist
+    #     ]
+    #     user_pose: [-0.25, 0, 0, 0.46, -0.25, 0,
+    #               -0.25, 0, 0, 0.46, -0.25, 0,
+    #               0, 0, 0,
+    #               0.07, 0.24, 0, 1.39, 0, 0, 0,
+    #               0.07, -0.24, 0, 1.39, 0, 0, 0]
+    - is_simulated: True
+      pkg: robot_sim
+      executable: simulation
+      params:
+        ic_keyframe: standing
       # callback_groups:
       publishers:
         - ros_parameter: pub_true_sim_state_setting
