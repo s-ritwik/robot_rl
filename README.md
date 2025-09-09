@@ -16,6 +16,7 @@ This project is a set of tools for end-to-end development of RL for robots. Spec
 interface can be run through a docker/dev-container provided in this repo. See below for more information.
 
 ## Installation
+When you clone this repo, please use Git Large File System (lfs).
 
 - Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
   We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
@@ -55,7 +56,7 @@ This helps in indexing all the python modules for intelligent suggestions while 
 ## Running Tasks
 To train a policy run:
 ```bash
-python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
+python scripts/rsl_rl/train_policy.py --env_type=<ENV_NAME> --headless
 ```
 
 Note that right now the only RL_LIBRARY that is tested in `RSL_RL`.
@@ -66,29 +67,52 @@ python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
 ```
 
 Note that right now the only RL_LIBRARY that is tested in `RSL_RL`.
+To add a run name add `--run_name=my_run_name`. This will add the name after the date on the folder with the run name.
+
+Note that right now the only RL library that is tested in `RSL_RL`.
 
 To play the most recently trained policy for a given task run:
 ```bash
-python scripts/<RL_LIBRARY>/play.py --task=<TASK_NAME>
+python scripts/rsl_rl/play_policy.py --env_type=<ENV_NAME> --log_data --export_policy --headless
 ```
 
-If you want to play from a specific checkpoint then you can run the play script with `--checkpoint=<log_dir_checkpoint>`.
+for a speicifc run you can pass in additional config such as `--load_run=<run_dir>`
+If you want to play from a specific checkpoint then you can run the play script with `--checkpoint=<checkpoint>` (`<checkpoint>` is something like "model_1800").
 
 For both `train` and `play` you can also specify a number of envs with `--num_envs=###`.
 
-TODO: Discuss custom train and play scripts.
+### Preparing for Hardware/Uploading to Hugging Face
+We suggest uploading the policy to hugging face when you are ready to run it on hardware so that this repo (the code repo) is kept clean.
+You can upload to hugging face automatically with
+```bash
+python scripts/hardware/export_to_hardware.py --env_type=<env-type> --load_run=<run_dir> --hf_repo_id=<username/repo> --policy_name=<policy_name>
+```
+This will load a already exported run and upload the exported policy to hugging face in the specified repo with the specified name.
 
+NOTE: The policy must already be exported (see `play_policy` above).
+
+For now we are uploading the policies to the hugging face repo [here](https://huggingface.co/zolkin/robot_rl/tree/main).
+
+These policies are automatically downloaded in the `transfer/obelisk` controller.
 ## RL Tasks
 
 RL Task list:
 
-| Task             |   Robot    |   Hardware Tested?   | Description                                                      |
-|------------------|:----------:|:--------------------:|------------------------------------------------------------------|
-| `G1-flat-vel`    |     G1     |  :white_check_mark:  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
+| Task          |   Robot    |   Hardware Tested?   | Description                                                      |
+|---------------|:----------:|:--------------------:|------------------------------------------------------------------|
+| `vanilla` |     G1     |  :white_check_mark:  | Basic, hand-tuned, RL walking on the G1 humanoid on flat ground. |
+| `lip_clf`         |     G1     |  :white_check_mark:  | Basic, LIP CLF RL walking on the G1 humanoid on flat ground. |
+| `hzd_clf_custom`  |     G1     |  :white_check_mark:  | with more torso mass; A HZD gait library; CLF RL walking on the G1 humanoid on flat ground. |
 | `Amber-flat-vel` |    AMBER   |           ❌         | Basic, hand-tuned RL walking on AMBER on flat ground           |
 | `Amber-rough-vel` |    AMBER   |           ❌         | Basic RL walking on AMBER on rough ground (not tuned)           |
 | `Amber-flat-lip-vel` |    AMBER   |           ❌         |  LIP footsteps + RL (to give PD setpoints) for a more physics informed model (Not tuned)           |
 
+## Copying checkpoitns from remote server 
+First mount the server to your local desktop
+ 
+```
+bash scripts/mount_remote.sh
+```
 
 ## sim2sim Transfer
 This code base has a built in sim2sim transfer (i.e. the policy is trained in IsaacLab and can be run in Mujoco).
@@ -177,6 +201,7 @@ Obelisk folder for further instructions.
 To run the sim2sim transfer, you will to install these dependencies in your conda environment:
 - `pygame`
 - `mujoco`
+- `huggingface_hub`
 
 ## Updating IsaacLab
 Sometimes you will want to updated the version of IsaacLab you are using. To do this, go to the IsaacLab directory
