@@ -9,14 +9,14 @@ from robot_rl.tasks.manager_based.robot_rl.terrains.rough import (
     ROUGH_SLOPED_FOR_FLAT_HZD_CFG,
 )
 
-from .g1_rough_env_lip_cfg import G1RoughLipEnvCfg
+from .g1_rough_env_mlip_cfg import G1RoughMlipEnvCfg
 
 
 ##
 # Environment configuration
 ##
 @configclass
-class G1FlatLipEnvCfg(G1RoughLipEnvCfg):
+class G1FlatMlipEnvCfg(G1RoughMlipEnvCfg):
     """Configuration for the G1 Flat environment."""
 
     def __post_init__(self):
@@ -61,15 +61,11 @@ class G1FlatLipEnvCfg(G1RoughLipEnvCfg):
         self.curriculum.clf_curriculum = None
 
 
-from robot_rl.tasks.manager_based.robot_rl.mdp.commands.cmd_cfg import MLIPCommandCfg
-from robot_rl.tasks.manager_based.robot_rl.humanoid_env_cfg import (
-    HumanoidCommandsCfg
-)
 
         
         
 @configclass
-class G1_custom_lip_clf(G1FlatLipEnvCfg):
+class G1_custom_mlip_clf(G1FlatMlipEnvCfg):
     def __post_init__(self):
         # Post init of parent
         super().__post_init__()
@@ -85,38 +81,8 @@ class G1_custom_lip_clf(G1FlatLipEnvCfg):
             },
         )
 
-class G1FlatRefTrackingEnvCfg(G1FlatLipEnvCfg):
-    """Configuration for the G1 Flat environment."""
 
-    def __post_init__(self):
-        # post init of parent
-        super().__post_init__()
-
-        # self.rewards.clf_reward = None
-        self.curriculum.clf_curriculum = None
-        self.rewards.clf_decreasing_condition = None
-        self.curriculum.clf_curriculum = None
-
-
-class G1FlatLipVdotEnvCfg(G1FlatLipEnvCfg):
-    """Configuration for the G1 Flat environment."""
-
-    def __post_init__(self):
-        # post init of parent
-        super().__post_init__()
-
-        self.rewards.clf_decreasing_condition = None
-        self.curriculum.clf_curriculum = None
-        self.rewards.clf_vdot_tanh = RewTerm(
-            func=mdp.vdot_tanh,
-            weight=2.0,
-            params={
-                "command_name": "hlip_ref",
-            },
-        )
-
-
-class G1FlatLipEnvCfg_PLAY(G1FlatLipEnvCfg):
+class G1FlatMlipEnvCfg_PLAY(G1FlatMlipEnvCfg):
     def __post_init__(self) -> None:
         # post init of parent
         super().__post_init__()
