@@ -20,12 +20,9 @@ onboard:
           3,                  # x
         ]
         init_behavior: "bow_forward"
-#        hf_policy_folder: "bow_forward_clf_sym/2026-01-09_11-32-45_T3_bowing_more_dr_new_traj"
-#        # hf_policy_folder: "bow_forward_clf_sym/2026-01-09_14-50-15_T4_bow_random_start_more_dr_new_traj"
-#        hf_repo_id: "zolkin/robot_rl"
         log: true
         log_decimation: 100 # relative to the control callback
-        config_name: "bow_forward/sim_bow_forward_config.yaml"
+        config_name: "multi-behavior_config/sim_multi-behavior_config.yaml"
       executable: g1_controller
       # callback_groups:
       publishers:
